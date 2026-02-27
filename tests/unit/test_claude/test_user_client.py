@@ -1,11 +1,11 @@
-"""Tests for UserClient: per-user persistent ClaudeSDKClient wrapper."""
+"""Tests for UserClient actor pattern."""
 
-from datetime import UTC, datetime
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.claude.user_client import UserClient
+from src.claude.user_client import QueryResult, UserClient, WorkItem
 
 
 class TestUserClientInitialState:
@@ -25,74 +25,110 @@ class TestUserClientInitialState:
             directory="/dir",
             session_id="abc",
             model="claude-sonnet-4-5",
+            idle_timeout=120,
         )
         assert client.session_id == "abc"
         assert client.model == "claude-sonnet-4-5"
+        assert client.idle_timeout == 120
 
 
-class TestUserClientConnect:
-    """Test connect() creates and connects a ClaudeSDKClient."""
-
-    @pytest.mark.asyncio
-    async def test_connect_creates_sdk_client(self) -> None:
-        mock_sdk = AsyncMock()
-        mock_options = MagicMock()
-
-        with patch(
-            "src.claude.user_client.ClaudeSDKClient", return_value=mock_sdk
-        ) as mock_cls:
-            uc = UserClient(user_id=1, directory="/dir")
-            await uc.connect(mock_options)
-
-            mock_cls.assert_called_once_with(mock_options)
-            mock_sdk.connect.assert_awaited_once()
-            assert uc.is_connected is True
+class TestUserClientStart:
+    """Test start() spawns worker and connects."""
 
     @pytest.mark.asyncio
-    async def test_connect_disconnects_existing_client(self) -> None:
-        """If already connected, connect() disconnects first."""
-        mock_sdk_old = AsyncMock()
-        mock_sdk_new = AsyncMock()
-        mock_options = MagicMock()
-
-        with patch(
-            "src.claude.user_client.ClaudeSDKClient",
-            side_effect=[mock_sdk_old, mock_sdk_new],
-        ):
-            uc = UserClient(user_id=1, directory="/dir")
-            await uc.connect(mock_options)
-            assert uc.is_connected is True
-
-            await uc.connect(mock_options)
-            mock_sdk_old.disconnect.assert_awaited_once()
-            assert uc.is_connected is True
-
-
-class TestUserClientDisconnect:
-    """Test disconnect() cleans up the SDK client."""
-
-    @pytest.mark.asyncio
-    async def test_disconnect_cleans_up(self) -> None:
+    async def test_start_sets_connected(self) -> None:
         mock_sdk = AsyncMock()
         mock_options = MagicMock()
 
         with patch("src.claude.user_client.ClaudeSDKClient", return_value=mock_sdk):
-            uc = UserClient(user_id=1, directory="/dir")
-            await uc.connect(mock_options)
-            assert uc.is_connected is True
-
-            await uc.disconnect()
-
-            mock_sdk.disconnect.assert_awaited_once()
-            assert uc.is_connected is False
-            assert uc._sdk_client is None
+            client = UserClient(user_id=1, directory="/dir")
+            await client.start(mock_options)
+            assert client.is_connected is True
+            mock_sdk.connect.assert_awaited_once()
+            await client.stop()
 
     @pytest.mark.asyncio
-    async def test_disconnect_noop_when_not_connected(self) -> None:
-        uc = UserClient(user_id=1, directory="/dir")
-        # Should not raise
-        await uc.disconnect()
-        assert uc.is_connected is False
+    async def test_start_when_already_running_stops_first(self) -> None:
+        mock_sdk_1 = AsyncMock()
+        mock_sdk_2 = AsyncMock()
+        mock_options = MagicMock()
+
+        with patch(
+            "src.claude.user_client.ClaudeSDKClient",
+            side_effect=[mock_sdk_1, mock_sdk_2],
+        ):
+            client = UserClient(user_id=1, directory="/dir")
+            await client.start(mock_options)
+            await client.start(mock_options)
+            assert client.is_connected is True
+            mock_sdk_1.disconnect.assert_awaited_once()
+            await client.stop()
+
+
+class TestUserClientStartFailure:
+    """Test start() propagates errors when connect fails."""
+
+    @pytest.mark.asyncio
+    async def test_start_raises_on_connect_failure(self) -> None:
+        mock_sdk = AsyncMock()
+        mock_sdk.connect.side_effect = RuntimeError("connection refused")
+        mock_options = MagicMock()
+
+        with patch(
+            "src.claude.user_client.ClaudeSDKClient", return_value=mock_sdk
+        ):
+            client = UserClient(user_id=1, directory="/dir")
+            with pytest.raises(RuntimeError, match="connection refused"):
+                await client.start(mock_options)
+            assert client.is_connected is False
+
+
+class TestUserClientStop:
+    """Test stop() cleanly shuts down the worker."""
+
+    @pytest.mark.asyncio
+    async def test_stop_disconnects(self) -> None:
+        mock_sdk = AsyncMock()
+        mock_options = MagicMock()
+
+        with patch("src.claude.user_client.ClaudeSDKClient", return_value=mock_sdk):
+            client = UserClient(user_id=1, directory="/dir")
+            await client.start(mock_options)
+            await client.stop()
+            assert client.is_connected is False
+            mock_sdk.disconnect.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_noop_when_not_running(self) -> None:
+        client = UserClient(user_id=1, directory="/dir")
+        await client.stop()  # should not raise
+        assert client.is_connected is False
+
+
+class TestUserClientSubmit:
+    """Test submit() enqueues work and returns result."""
+
+    @pytest.mark.asyncio
+    async def test_submit_returns_result(self) -> None:
+        client = UserClient(user_id=1, directory="/dir")
+        client._running = True
+        client._queue = asyncio.Queue()
+
+        async def fake_consumer() -> None:
+            item = await client._queue.get()
+            item.future.set_result(QueryResult(response_text="hello", session_id="s1"))
+
+        task = asyncio.create_task(fake_consumer())
+        result = await client.submit("test prompt")
+        assert result.response_text == "hello"
+        assert result.session_id == "s1"
+        await task
+
+    @pytest.mark.asyncio
+    async def test_submit_when_not_running_raises(self) -> None:
+        client = UserClient(user_id=1, directory="/dir")
+        with pytest.raises(RuntimeError, match="not running"):
+            await client.submit("hello")
 
 
 class TestUserClientInterrupt:
@@ -101,106 +137,113 @@ class TestUserClientInterrupt:
     @pytest.mark.asyncio
     async def test_interrupt_delegates_to_sdk(self) -> None:
         mock_sdk = AsyncMock()
-        mock_options = MagicMock()
+        client = UserClient(user_id=1, directory="/dir")
+        client._sdk_client = mock_sdk
+        client._querying = True
 
-        with patch("src.claude.user_client.ClaudeSDKClient", return_value=mock_sdk):
-            uc = UserClient(user_id=1, directory="/dir")
-            await uc.connect(mock_options)
-            # Simulate querying state
-            uc._querying = True
-
-            await uc.interrupt()
-
-            mock_sdk.interrupt.assert_awaited_once()
+        await client.interrupt()
+        mock_sdk.interrupt.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_interrupt_noop_when_not_querying(self) -> None:
         mock_sdk = AsyncMock()
-        mock_options = MagicMock()
+        client = UserClient(user_id=1, directory="/dir")
+        client._sdk_client = mock_sdk
+        client._querying = False
 
+        await client.interrupt()
+        mock_sdk.interrupt.assert_not_awaited()
+
+
+class TestUserClientIdleTimeout:
+    """Test that worker exits on idle timeout."""
+
+    @pytest.mark.asyncio
+    async def test_idle_timeout_stops_actor(self) -> None:
+        client = UserClient(
+            user_id=123,
+            directory="/test",
+            idle_timeout=0.1,  # 100ms for fast test
+        )
+        mock_sdk = AsyncMock()
         with patch("src.claude.user_client.ClaudeSDKClient", return_value=mock_sdk):
-            uc = UserClient(user_id=1, directory="/dir")
-            await uc.connect(mock_options)
-            assert uc.is_querying is False
-
-            # Should not raise and should NOT call interrupt
-            await uc.interrupt()
-
-            mock_sdk.interrupt.assert_not_awaited()
+            await client.start(MagicMock())
+            # Don't submit anything — let it idle timeout
+            await asyncio.sleep(0.3)
+            assert not client.is_connected
+            mock_sdk.disconnect.assert_awaited_once()
 
 
-class TestUserClientQuery:
-    """Test query() method behavior."""
+class TestUserClientOnExit:
+    """Test on_exit callback is called when worker stops."""
 
     @pytest.mark.asyncio
-    async def test_query_raises_when_not_connected(self) -> None:
-        """query() raises RuntimeError when not connected."""
-        uc = UserClient(user_id=123, directory="/tmp")
+    async def test_on_exit_called_on_stop(self) -> None:
+        exit_called: dict[str, int] = {}
 
-        with pytest.raises(RuntimeError, match="not connected"):
-            async for _ in uc.query("hello"):
-                pass
-
-    @pytest.mark.asyncio
-    async def test_query_sets_querying_state(self) -> None:
-        """query() sets is_querying during execution."""
-        uc = UserClient(user_id=123, directory="/tmp")
+        def on_exit(uid: int) -> None:
+            exit_called["user_id"] = uid
 
         mock_sdk = AsyncMock()
+        with patch("src.claude.user_client.ClaudeSDKClient", return_value=mock_sdk):
+            client = UserClient(user_id=42, directory="/dir", on_exit=on_exit)
+            await client.start(MagicMock())
+            await client.stop()
 
-        # Raw data dict that parse_message will receive
-        raw_msg = {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}}
-
-        async def mock_receive():
-            yield raw_msg
-
-        # The code accesses sdk_client._query.receive_messages()
-        mock_query_obj = MagicMock()
-        mock_query_obj.receive_messages = mock_receive
-        mock_sdk._query = mock_query_obj
-
-        uc._sdk_client = mock_sdk
-        uc._connected = True
-
-        messages = []
-        with patch("src.claude.user_client.parse_message") as mock_parse:
-            parsed_msg = MagicMock()
-            mock_parse.return_value = parsed_msg
-
-            async for msg in uc.query("hello"):
-                assert uc.is_querying is True
-                messages.append(msg)
-
-        assert uc.is_querying is False
-        assert len(messages) == 1
+        assert exit_called.get("user_id") == 42
 
     @pytest.mark.asyncio
-    async def test_query_resets_querying_on_error(self) -> None:
-        """query() resets is_querying even if an error occurs."""
-        uc = UserClient(user_id=123, directory="/tmp")
+    async def test_on_exit_called_on_idle_timeout(self) -> None:
+        exit_called: dict[str, int] = {}
+
+        def on_exit(uid: int) -> None:
+            exit_called["user_id"] = uid
 
         mock_sdk = AsyncMock()
-        mock_sdk.query.side_effect = Exception("SDK error")
+        with patch("src.claude.user_client.ClaudeSDKClient", return_value=mock_sdk):
+            client = UserClient(
+                user_id=42, directory="/dir", idle_timeout=0.1, on_exit=on_exit
+            )
+            await client.start(MagicMock())
+            await asyncio.sleep(0.3)
 
-        uc._sdk_client = mock_sdk
-        uc._connected = True
-
-        with pytest.raises(Exception, match="SDK error"):
-            async for _ in uc.query("hello"):
-                pass
-
-        assert uc.is_querying is False
+        assert exit_called.get("user_id") == 42
 
 
-class TestUserClientTouch:
-    """Test touch() updates last_active."""
+class TestWorkItem:
+    def test_work_item_creation(self) -> None:
+        future = asyncio.get_event_loop().create_future()
+        item = WorkItem(prompt="hello", future=future)
+        assert item.prompt == "hello"
+        assert item.on_stream is None
+        assert item.future is future
 
-    def test_touch_updates_last_active(self) -> None:
-        uc = UserClient(user_id=1, directory="/dir")
-        before = uc.last_active
-        # Force a tiny sleep equivalent by nudging time
-        uc.touch()
-        after = uc.last_active
-        # last_active must be a timezone-aware UTC datetime
-        assert after.tzinfo is not None
-        assert after >= before
+    def test_work_item_with_callback(self) -> None:
+        future = asyncio.get_event_loop().create_future()
+
+        async def cb(x: object) -> None:
+            pass
+
+        item = WorkItem(prompt="hi", on_stream=cb, future=future)
+        assert item.on_stream is cb
+
+
+class TestQueryResult:
+    def test_query_result_creation(self) -> None:
+        result = QueryResult(
+            response_text="hello",
+            session_id="sess-1",
+            cost=0.01,
+            num_turns=2,
+            duration_ms=1500,
+        )
+        assert result.response_text == "hello"
+        assert result.session_id == "sess-1"
+        assert result.cost == 0.01
+
+    def test_query_result_defaults(self) -> None:
+        result = QueryResult(response_text="hello")
+        assert result.session_id is None
+        assert result.cost == 0.0
+        assert result.num_turns == 0
+        assert result.duration_ms == 0

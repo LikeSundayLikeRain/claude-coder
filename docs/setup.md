@@ -4,7 +4,7 @@
 
 ### 1. Prerequisites
 
-- **Python 3.11+** -- [Download here](https://www.python.org/downloads/)
+- **Python 3.12+** -- [Download here](https://www.python.org/downloads/)
 - **Telegram Bot Token** -- Get one from [@BotFather](https://t.me/botfather)
 - **Claude Authentication** -- Choose one method below
 - **For source installs:** [uv](https://docs.astral.sh/uv/getting-started/installation/)
@@ -211,15 +211,6 @@ ENABLE_TOKEN_AUTH=true
 AUTH_TOKEN_SECRET=your-secret-key-here
 ```
 
-### Rate Limiting
-
-```bash
-RATE_LIMIT_REQUESTS=10
-RATE_LIMIT_WINDOW=60
-RATE_LIMIT_BURST=20
-CLAUDE_MAX_COST_PER_USER=10.0
-```
-
 ### Development Setup
 
 ```bash
@@ -227,7 +218,6 @@ DEBUG=true
 DEVELOPMENT_MODE=true
 LOG_LEVEL=DEBUG
 ENVIRONMENT=development
-RATE_LIMIT_REQUESTS=100
 CLAUDE_TIMEOUT_SECONDS=600
 ```
 
@@ -311,8 +301,6 @@ ls -la /path/to/your/projects
 ENVIRONMENT=production
 DEBUG=false
 LOG_LEVEL=INFO
-RATE_LIMIT_REQUESTS=5
-CLAUDE_MAX_COST_PER_USER=5.0
 SESSION_TIMEOUT_HOURS=12
 ENABLE_TELEMETRY=true
 ```

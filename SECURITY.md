@@ -26,18 +26,13 @@ The Claude Code Telegram Bot implements a defense-in-depth security model with m
 - **Path Sanitization**: Removes dangerous characters and patterns (`;`, `&&`, `$()`, `..`)
 - **Secret File Protection**: Blocks access to `.env`, `.ssh`, `id_rsa`, `.pem` files
 
-### 4. Rate Limiting
-- **Request Rate Limiting**: Token bucket algorithm prevents abuse with configurable limits
-- **Cost-Based Limiting**: Tracks and limits Claude usage costs per user
-- **Burst Protection**: Configurable burst capacity prevents spike attacks
-
-### 5. Audit Logging
+### 4. Audit Logging
 - **Authentication Events**: All login attempts and auth failures logged
 - **Command Execution**: All commands and file operations logged
 - **Security Violations**: Path traversal attempts, injection attempts, and other violations logged
 - **Risk Assessment**: Automatic severity classification for security events
 
-### 6. Webhook Authentication
+### 5. Webhook Authentication
 - **GitHub HMAC-SHA256**: Webhook payloads verified against `X-Hub-Signature-256` header using a shared secret
 - **Generic Bearer Token**: Non-GitHub providers authenticated via `Authorization: Bearer <token>` header
 - **Deduplication**: Atomic `INSERT OR IGNORE` on delivery ID prevents replay attacks
@@ -48,11 +43,10 @@ The Claude Code Telegram Bot implements a defense-in-depth security model with m
 All planned security features are implemented and active:
 
 - Multi-provider authentication system (whitelist + token)
-- Rate limiting with token bucket algorithm (request and cost-based)
 - Input validation with path traversal, command injection, and zip bomb protection
 - Directory isolation with approved directory boundaries
 - Security audit logging with risk assessment and event tracking
-- Bot middleware framework (auth, rate limit, security, burst protection)
+- Bot middleware framework (auth, security)
 - Webhook signature verification (GitHub HMAC-SHA256, generic Bearer token)
 - Event security middleware for webhook and scheduled event validation
 - Configuration security via Pydantic validators and SecretStr
@@ -90,14 +84,6 @@ API_SERVER_PORT=8080
 ### Recommended Security Settings
 
 ```bash
-# Strict rate limiting for production
-RATE_LIMIT_REQUESTS=5
-RATE_LIMIT_WINDOW=60
-RATE_LIMIT_BURST=10
-
-# Cost controls
-CLAUDE_MAX_COST_PER_USER=5.0
-
 # Security features
 ENABLE_TELEMETRY=true  # For security monitoring
 LOG_LEVEL=INFO         # Capture security events
@@ -162,9 +148,8 @@ ENVIRONMENT=production  # Enables strict security defaults
 1. **Directory Traversal** (High Priority) -- path traversal, symlink attacks
 2. **Command Injection** (High Priority) -- shell injection, env var injection
 3. **Unauthorized Access** (Medium Priority) -- non-whitelisted users, token replay
-4. **Resource Abuse** (Medium Priority) -- rate limit bypass, cost limit violations
-5. **Webhook Forgery** (Medium Priority) -- unsigned payloads, replay attacks
-6. **Information Disclosure** (Low Priority) -- sensitive file exposure, error leakage
+4. **Webhook Forgery** (Medium Priority) -- unsigned payloads, replay attacks
+5. **Information Disclosure** (Low Priority) -- sensitive file exposure, error leakage
 
 ### Threats Outside Scope
 
@@ -191,7 +176,6 @@ Include: description, steps to reproduce, potential impact, and suggested mitiga
 
 - [ ] `APPROVED_DIRECTORY` properly configured and restricted
 - [ ] `ALLOWED_USERS` whitelist configured
-- [ ] Rate limiting enabled and configured
 - [ ] Logging enabled and monitored
 - [ ] Authentication tokens properly secured
 - [ ] `GITHUB_WEBHOOK_SECRET` set (if using GitHub webhooks)

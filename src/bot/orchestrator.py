@@ -30,8 +30,6 @@ from ..claude.history import (
     read_claude_history,
     read_session_transcript,
 )
-from ..claude.sdk_integration import StreamUpdate
-from ..claude.stream_handler import StreamHandler
 from ..config.settings import Settings
 from ..projects import PrivateTopicsUnavailableError
 from ..skills.loader import discover_skills, load_skill_body, resolve_skill_prompt
@@ -297,7 +295,7 @@ class MessageOrchestrator:
         handlers = [
             ("start", self.agentic_start),
             ("new", self.agentic_new),
-            ("stop", self.handle_stop),
+            ("interrupt", self.handle_interrupt),
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
             ("compact", self.agentic_compact),
@@ -409,7 +407,7 @@ class MessageOrchestrator:
             commands = [
                 BotCommand("start", "Start the bot"),
                 BotCommand("new", "Start a fresh session"),
-                BotCommand("stop", "Interrupt running query"),
+                BotCommand("interrupt", "Interrupt running query"),
                 BotCommand("status", "Show session status"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
                 BotCommand("compact", "Compress context, keep continuity"),
@@ -443,7 +441,7 @@ class MessageOrchestrator:
 
     # --- Agentic handlers ---
 
-    async def handle_stop(
+    async def handle_interrupt(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Interrupt the currently running Claude query."""
@@ -564,7 +562,7 @@ class MessageOrchestrator:
             f"Working in: {dir_display}\n\n"
             f"<b>Commands:</b>\n"
             f"/new — Start fresh session\n"
-            f"/stop — Interrupt running query\n"
+            f"/interrupt — Interrupt running query\n"
             f"/status — Current session info\n"
             f"/model — Switch Claude model\n"
             f"/sessions — Pick a session to resume\n"
@@ -867,7 +865,9 @@ class MessageOrchestrator:
                     lines.append(f"{icon} {entry['name']}")
 
         if len(activity_log) > max_entries:
-            lines.insert(1, f"... ({len(activity_log) - max_entries} earlier entries)\n")
+            lines.insert(
+                1, f"... ({len(activity_log) - max_entries} earlier entries)\n"
+            )
 
         return "\n".join(lines)
 
@@ -908,7 +908,7 @@ class MessageOrchestrator:
         current_dir: Any,
         session_id: Optional[str],
         force_new: bool,
-        on_stream: Optional[Callable[[StreamUpdate], Any]],
+        on_stream: Optional[Callable[..., Any]],
         context: ContextTypes.DEFAULT_TYPE,
     ) -> "ClaudeResponse":
         """Run a query via ClientManager, streaming events through on_stream.
@@ -940,9 +940,6 @@ class MessageOrchestrator:
 
         directory = str(current_dir)
         approved_dir = str(self.settings.approved_directory)
-        stream_handler = StreamHandler()
-
-        start_ms = int(time.time() * 1000)
 
         client = await client_manager.get_or_connect(
             user_id=user_id,
@@ -952,59 +949,17 @@ class MessageOrchestrator:
             force_new=force_new,
         )
 
-        response_text = ""
-        result_session_id: Optional[str] = None
-        cost = 0.0
-        num_turns = 0
+        result = await client.submit(prompt, on_stream=on_stream)
 
-        async for message in client.query(prompt):
-            event = stream_handler.extract_content(message)
-            # Partial SDK StreamEvents are for UX progress only;
-            # complete AssistantMessages drive turn counting.
-            is_partial = message.__class__.__name__ == "StreamEvent"
-
-            if event.type == "result":
-                response_text = event.content or ""
-                result_session_id = event.session_id
-                cost = event.cost or 0.0
-                if result_session_id:
-                    await client_manager.update_session_id(user_id, result_session_id)
-            elif event.type == "text" and event.content:
-                if on_stream:
-                    await on_stream(
-                        StreamUpdate(type="assistant", content=event.content)
-                    )
-            elif event.type == "tool_use":
-                if not is_partial:
-                    num_turns += 1
-                if on_stream:
-                    await on_stream(
-                        StreamUpdate(
-                            type="assistant",
-                            tool_calls=[
-                                {
-                                    "name": event.tool_name or "",
-                                    "input": event.tool_input or {},
-                                }
-                            ],
-                        )
-                    )
-            elif event.type == "thinking" and event.content:
-                if on_stream:
-                    await on_stream(
-                        StreamUpdate(
-                            type="assistant", content=f"\U0001f4ad {event.content}"
-                        )
-                    )
-
-        duration_ms = int(time.time() * 1000) - start_ms
+        if result.session_id:
+            await client_manager.update_session_id(user_id, result.session_id)
 
         return ClaudeResponse(
-            content=response_text,
-            session_id=result_session_id or "",
-            cost=cost,
-            duration_ms=duration_ms,
-            num_turns=num_turns,
+            content=result.response_text,
+            session_id=result.session_id or "",
+            cost=result.cost,
+            duration_ms=result.duration_ms,
+            num_turns=result.num_turns,
         )
 
     @staticmethod
@@ -1038,36 +993,36 @@ class MessageOrchestrator:
         progress_msg: Any,
         tool_log: List[Dict[str, Any]],
         start_time: float,
-    ) -> Optional[Callable[[StreamUpdate], Any]]:
+    ) -> Optional[Callable[..., Any]]:
         """Create a stream callback for verbose progress updates.
 
         Returns None when verbose_level is 0 (nothing to display).
         Typing indicators are handled by a separate heartbeat task.
+
+        The callback signature matches UserClient._process_item:
+        on_stream(event_type: str, content: Any)
         """
         if verbose_level == 0:
             return None
 
         last_edit_time = [0.0]  # mutable container for closure
 
-        async def _on_stream(update_obj: StreamUpdate) -> None:
+        async def _on_stream(event_type: str, content: Any) -> None:
             # Capture tool calls
-            if update_obj.tool_calls:
-                for tc in update_obj.tool_calls:
-                    name = tc.get("name", "unknown")
-                    detail = self._summarize_tool_input(name, tc.get("input", {}))
-                    tool_log.append({"kind": "tool", "name": name, "detail": detail})
+            if event_type == "tool_use" and isinstance(content, dict):
+                name = content.get("name", "unknown")
+                detail = self._summarize_tool_input(name, content.get("input", {}))
+                tool_log.append({"kind": "tool", "name": name, "detail": detail})
 
             # Capture assistant text (reasoning / commentary)
             # Accumulate consecutive text deltas into a single entry
             # to avoid flooding the progress display with word fragments.
-            if update_obj.type == "assistant" and update_obj.content:
-                text = update_obj.content
+            if event_type in ("text", "thinking") and content:
+                text = str(content)
                 if text and verbose_level >= 1:
                     # Append to last text entry if it exists, else create new
                     if tool_log and tool_log[-1].get("kind") == "text":
-                        tool_log[-1]["detail"] = (
-                            tool_log[-1]["detail"] + text
-                        )[:200]
+                        tool_log[-1]["detail"] = (tool_log[-1]["detail"] + text)[:200]
                     else:
                         tool_log.append({"kind": "text", "detail": text[:200]})
 
@@ -1110,7 +1065,7 @@ class MessageOrchestrator:
                 registered_commands = {
                     "start",
                     "new",
-                    "stop",
+                    "interrupt",
                     "status",
                     "verbose",
                     "compact",
@@ -1170,9 +1125,7 @@ class MessageOrchestrator:
                             # user question — mirrors how the CLI's Skill
                             # tool presents skills to Claude.
                             args_line = (
-                                f"\nUser arguments: {skill_args}"
-                                if skill_args
-                                else ""
+                                f"\nUser arguments: {skill_args}" if skill_args else ""
                             )
                             message_text = (
                                 f"<skill-invocation>\n"

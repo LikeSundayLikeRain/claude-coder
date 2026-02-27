@@ -30,8 +30,8 @@ uv run mypy src
 
 **Agentic mode** uses a layered client architecture:
 
-- `ClientManager` (`src/claude/client_manager.py`) — Manages persistent per-user `UserClient` instances with automatic session resolution and cleanup.
-- `UserClient` (`src/claude/user_client.py`) — Wraps `ClaudeSDKClient` for a single user, providing `query()` for streaming and connection lifecycle.
+- `ClientManager` (`src/claude/client_manager.py`) — Manages persistent per-user `UserClient` actors with automatic session resolution. Actors self-remove on idle timeout via `on_exit` callback.
+- `UserClient` (`src/claude/user_client.py`) — Actor-based Claude SDK client for one user. A long-lived asyncio task owns the full `connect → query → disconnect` lifecycle in a single task (required by the SDK's anyio cancel scopes). Public API: `start()`, `submit()`, `stop()`, `interrupt()`. Idle timeout built into the worker's `queue.get()`.
 - `OptionsBuilder` (`src/claude/options.py`) — Builds `ClaudeAgentOptions` from CLI settings (`~/.claude/settings.json`) with full feature parity: model selection, system prompt, permission mode, tool monitoring via `can_use_tool`, and `CLAUDECODE` env clearing.
 - `StreamHandler` (`src/claude/stream_handler.py`) — Extracts structured `StreamEvent`s from SDK messages (`ResultMessage`, `AssistantMessage`, `StreamEvent` partials) for real-time progress display.
 - `SessionResolver` (`src/claude/session.py`) — Resolves session IDs from Claude CLI's `~/.claude/history.jsonl`, keyed by user+directory.
@@ -47,8 +47,8 @@ Sessions auto-resume: per user+directory, read from Claude CLI's `~/.claude/hist
 ```
 Telegram message -> Security middleware (group -3) -> Auth middleware (group -2)
 -> MessageOrchestrator.agentic_text() (group 10)
--> ClientManager.get_or_connect() -> UserClient.query() -> SDK streaming
--> StreamHandler extracts events -> Real-time progress sent to Telegram
+-> ClientManager.get_or_connect() -> UserClient.submit() -> actor processes query
+-> StreamHandler extracts events inside actor -> Real-time progress via callback
 -> Final response stored in SQLite -> Sent back to Telegram
 ```
 
@@ -133,7 +133,7 @@ All datetimes use timezone-aware UTC: `datetime.now(UTC)` (not `datetime.utcnow(
 
 ### Agentic mode
 
-Agentic mode commands: `/start`, `/new`, `/status`, `/verbose`, `/repo`, `/stop`, `/model`. Unrecognized `/commands` are routed to skill lookup. If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`. To add a new command:
+Agentic mode commands: `/start`, `/new`, `/status`, `/verbose`, `/repo`, `/interrupt`, `/model`. Unrecognized `/commands` are routed to skill lookup. If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`. To add a new command:
 
 1. Add handler function in `src/bot/orchestrator.py`
 2. Register in `MessageOrchestrator._register_agentic_handlers()`

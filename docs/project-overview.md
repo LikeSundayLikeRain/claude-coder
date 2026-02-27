@@ -41,17 +41,15 @@ A Telegram bot that provides remote access to Claude Code, allowing developers t
 - **Notifications**: Rate-limited Telegram delivery for agent responses
 
 ### Claude Code Integration
-- Full Claude Code SDK integration (CLI fallback)
-- Session management per user/project
-- Tool usage visibility
-- Cost tracking and limits
+- Full Claude Code SDK integration with actor-based client lifecycle
+- Session management per user/project with auto-resume
+- Tool usage visibility with configurable verbose output
 
 ### Security & Access Control
 - Approved directory boundaries
 - User authentication (whitelist and token-based)
-- Rate limiting per user
 - Webhook authentication (HMAC-SHA256, Bearer token)
-- Audit logging
+- Input validation and audit logging
 
 ## Technical Architecture
 
@@ -70,12 +68,13 @@ A Telegram bot that provides remote access to Claude Code, allowing developers t
    - Input validation and security middleware
 
 4. **Claude Integration** (`src/claude/`)
-   - SDK and CLI backends via facade pattern
-   - Session state management and auto-resume
+   - Actor-based `UserClient` with start/submit/stop lifecycle
+   - `ClientManager` for per-user client management
+   - `OptionsBuilder` for SDK configuration with `can_use_tool` callback
 
 5. **Storage Layer** (`src/storage/`)
    - SQLite database with repository pattern
-   - Session persistence, analytics, cost tracking
+   - Session persistence and analytics
 
 6. **Event Bus** (`src/events/`)
    - Async pub/sub with typed subscriptions
@@ -99,7 +98,8 @@ A Telegram bot that provides remote access to Claude Code, allowing developers t
 **Agentic mode (direct messages):**
 ```
 User Message -> Telegram -> Middleware Chain -> MessageOrchestrator
-    -> ClaudeIntegration.run_command() -> Response -> Telegram
+    -> ClientManager.get_or_connect() -> UserClient.submit() -> SDK streaming
+    -> StreamHandler extracts events -> Real-time progress -> Telegram
 ```
 
 **External triggers (webhooks/scheduler):**
@@ -112,10 +112,9 @@ Webhook/Cron -> EventBus -> AgentHandler -> ClaudeIntegration
 
 - **Directory Isolation**: All operations confined to approved directory tree
 - **User Authentication**: Whitelist or token-based access
-- **Rate Limiting**: Prevent abuse and control costs
+- **Input Validation**: Sanitize all user inputs
 - **Webhook Verification**: HMAC-SHA256 and Bearer token authentication
 - **Audit Trail**: Log all operations for security review
-- **Input Validation**: Sanitize all user inputs
 
 ## Development Principles
 

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Claude Integration Rewrite**: Replaced layered SDK wrapper with actor-based `UserClient` pattern
+  - `UserClient` owns the full SDK lifecycle (connect → query → disconnect) in a single asyncio task
+  - `ClientManager` manages per-user `UserClient` instances with automatic idle timeout
+  - `OptionsBuilder` constructs `ClaudeAgentOptions` with `can_use_tool` callback
+  - `StreamHandler` extracts structured events from SDK messages for real-time display
+  - Removed `ClaudeSDKManager`, `SessionManager`, `InMemorySessionStorage`, cleanup loop
+- **Build System**: Migrated from Poetry to uv for dependency management
+- **Python Version**: Minimum version bumped from 3.11 to 3.12
+
+### Removed
+- **Rate Limiting**: Removed user-facing rate limiting (token bucket algorithm, burst protection)
+- **Cost Tracking**: Removed per-user cost tracking and `CLAUDE_MAX_COST_PER_USER` setting
+- **CLI Subprocess Backend**: Removed `integration.py` and `parser.py` (SDK-only now)
+- **ToolMonitor Class**: Replaced with SDK-native `can_use_tool` callback
+
 ### Added
 - **Version Management & Distribution**:
   - Single source of truth: version read from `pyproject.toml` via `importlib.metadata`

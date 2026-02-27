@@ -70,24 +70,8 @@ CLAUDE_MAX_TURNS=10
 # Timeout for Claude operations in seconds
 CLAUDE_TIMEOUT_SECONDS=300
 
-# Maximum cost per user in USD
-CLAUDE_MAX_COST_PER_USER=10.0
-
 # Allowed Claude tools (comma-separated list; see docs/tools.md for descriptions)
 CLAUDE_ALLOWED_TOOLS=Read,Write,Edit,Bash,Glob,Grep,LS,Task,TaskOutput,MultiEdit,NotebookRead,NotebookEdit,WebFetch,TodoRead,TodoWrite,WebSearch
-```
-
-#### Rate Limiting
-
-```bash
-# Number of requests allowed per window
-RATE_LIMIT_REQUESTS=10
-
-# Rate limit window in seconds
-RATE_LIMIT_WINDOW=60
-
-# Burst capacity for rate limiting
-RATE_LIMIT_BURST=20
 ```
 
 #### Storage & Database
@@ -236,7 +220,6 @@ Activated when `ENVIRONMENT=development` or when `DEBUG=true`:
 - `debug = true`
 - `development_mode = true`
 - `log_level = "DEBUG"`
-- `rate_limit_requests = 100` (more lenient)
 - `claude_timeout_seconds = 600` (longer timeout)
 - `enable_telemetry = false`
 
@@ -248,7 +231,6 @@ Activated when `ENVIRONMENT=testing`:
 - `database_url = "sqlite:///:memory:"` (in-memory database)
 - `approved_directory = "/tmp/test_projects"`
 - `claude_timeout_seconds = 30` (faster timeout)
-- `rate_limit_requests = 1000` (no effective rate limiting)
 
 ### Production Environment
 
@@ -257,8 +239,6 @@ Activated when `ENVIRONMENT=production`:
 - `debug = false`
 - `log_level = "INFO"`
 - `enable_telemetry = true`
-- `claude_max_cost_per_user = 5.0` (stricter cost limit)
-- `rate_limit_requests = 5` (stricter rate limiting)
 - `session_timeout_hours = 12` (shorter session timeout)
 
 ## Feature Flags

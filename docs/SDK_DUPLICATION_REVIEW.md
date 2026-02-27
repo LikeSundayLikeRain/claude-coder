@@ -1,5 +1,9 @@
 # SDK Duplication & Over-Complication Review
 
+> **Note (2026-02-27):** This document is largely **superseded**. The `src/claude/` module
+> was rewritten with an actor-based `UserClient` pattern that addresses Findings 1, 7, and
+> the remaining Phase 4 items. See `CHANGELOG.md` under `[Unreleased]` for details.
+
 **Date:** 2026-02-19
 **Last Updated:** 2026-02-20 (post CLI backend removal)
 **SDK Version:** `claude-agent-sdk ^0.1.38`

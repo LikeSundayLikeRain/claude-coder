@@ -16,7 +16,7 @@ This project is currently under active development with the following status:
 
 ### Prerequisites
 
-- Python 3.11 or higher
+- Python 3.12 or higher
 - uv for dependency management
 - Git for version control
 

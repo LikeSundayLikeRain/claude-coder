@@ -4,7 +4,7 @@ This document describes the tools that Claude Code can use when interacting thro
 
 ## Overview
 
-By default, the bot allows **16 tools**. These are configured via the `CLAUDE_ALLOWED_TOOLS` environment variable and validated at runtime by the [ToolMonitor](../src/claude/monitor.py).
+By default, the bot allows **16 tools**. These are configured via the `CLAUDE_ALLOWED_TOOLS` environment variable and validated at runtime by the SDK's `can_use_tool` callback (see `src/claude/options.py`).
 
 When Claude uses a tool during a conversation, the tool name appears in real-time if verbose output is enabled (`/verbose 1` or `/verbose 2`). If Claude attempts to use a tool that is not in the allowed list, the bot blocks the call and displays an error with the list of currently allowed tools.
 

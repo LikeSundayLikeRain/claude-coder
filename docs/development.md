@@ -6,7 +6,7 @@ This document provides detailed information for developers working on the Claude
 
 ### Prerequisites
 
-- Python 3.11 or higher
+- Python 3.12 or higher
 - uv for dependency management
 - Git for version control
 - Claude authentication (one of):
@@ -108,12 +108,13 @@ src/
 │   └── utils/        # Response formatting utilities
 ├── claude/           # Claude Code integration (✅ Complete)
 │   ├── __init__.py
-│   ├── integration.py # Subprocess management
-│   ├── parser.py     # Output parsing and formatting
-│   ├── session.py    # Session management
-│   ├── monitor.py    # Tool usage monitoring
-│   ├── facade.py     # High-level integration API
-│   └── exceptions.py # Claude-specific exceptions
+│   ├── client_manager.py # Per-user UserClient lifecycle management
+│   ├── user_client.py    # Actor-based SDK client (start/submit/stop)
+│   ├── options.py        # ClaudeAgentOptions builder
+│   ├── stream_handler.py # StreamEvent extraction from SDK messages
+│   ├── session.py        # Session ID resolution from history.jsonl
+│   ├── monitor.py        # Bash directory boundary checking
+│   └── facade.py         # High-level integration API (classic mode)
 ├── storage/          # Database and persistence (✅ Complete)
 │   ├── __init__.py
 │   ├── database.py   # Database connection and migrations
@@ -124,8 +125,7 @@ src/
 ├── security/         # Authentication and security (✅ Complete)
 │   ├── __init__.py
 │   ├── auth.py       # Authentication logic
-│   ├── validators.py # Input validation
-│   └── rate_limiter.py # Rate limiting
+│   └── validators.py # Input validation
 ├── utils/            # Utilities and constants (✅ Complete)
 │   ├── __init__.py
 │   └── constants.py  # Application constants
@@ -263,7 +263,7 @@ We aim for >80% test coverage. Current coverage:
 
 #### TODO-1: Project Structure
 - Complete package layout with proper Python packaging
-- Poetry dependency management with dev/test/prod separation  
+- uv dependency management with dev/test/prod separation
 - Makefile with development commands
 - Exception hierarchy with proper inheritance
 - Structured logging with JSON output for production
@@ -281,7 +281,6 @@ We aim for >80% test coverage. Current coverage:
 
 #### TODO-3: Authentication & Security Framework
 - Multi-provider authentication system (whitelist and token-based)
-- Rate limiting with token bucket algorithm
 - Comprehensive input validation and path traversal prevention
 - Security audit logging with risk assessment
 - Bot middleware framework for security integration
@@ -294,11 +293,10 @@ We aim for >80% test coverage. Current coverage:
 - Error handling middleware with user-friendly messages
 
 #### TODO-5: Claude Code Integration
-- Async subprocess management for Claude CLI with timeout handling
+- Actor-based SDK client with per-user lifecycle (connect/query/disconnect)
 - Response streaming and parsing for real-time updates
 - Session state persistence with context maintenance
-- Tool usage monitoring and security validation
-- Cost tracking and usage analytics
+- Tool usage monitoring via SDK `can_use_tool` callback
 
 #### TODO-6: Storage Layer
 - SQLite database with complete schema and foreign key relationships
@@ -307,24 +305,22 @@ We aim for >80% test coverage. Current coverage:
 - Analytics and reporting with user/admin dashboards
 - Persistent session storage replacing in-memory storage
 
-### 🚧 Next Implementation Steps
-
-#### TODO-7: Advanced Features (Current Priority)
+#### TODO-7: Advanced Features
 - File upload handling with security validation
 - Git integration for repository operations
 - Quick actions system for common workflows
 - Session export features (Markdown, JSON, HTML)
 - Image/screenshot support and processing
+- Event-driven platform (webhooks, scheduler, notifications)
+
+### 🚧 Ongoing
 
 #### TODO-8: Complete Testing Suite
 - Integration tests for end-to-end workflows
 - Performance testing and benchmarking
 - Security testing and penetration testing
-- Load testing for concurrent users
 
 #### TODO-9: Deployment & Documentation
-- Docker configuration and containerization
-- Kubernetes manifests for production deployment
 - Complete user and admin documentation
 - API documentation and developer guides
 

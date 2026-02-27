@@ -82,7 +82,7 @@ def deps():
 
 
 def test_agentic_registers_commands(agentic_settings, deps):
-    """Agentic mode registers start, new, stop, status, verbose, compact, model, repo, sessions, commands."""
+    """Agentic mode registers start, new, interrupt, status, verbose, compact, model, repo, sessions, commands."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     app = MagicMock()
     app.add_handler = MagicMock()
@@ -102,7 +102,7 @@ def test_agentic_registers_commands(agentic_settings, deps):
     assert len(cmd_handlers) == 10
     assert frozenset({"start"}) in commands
     assert frozenset({"new"}) in commands
-    assert frozenset({"stop"}) in commands
+    assert frozenset({"interrupt"}) in commands
     assert frozenset({"status"}) in commands
     assert frozenset({"verbose"}) in commands
     assert frozenset({"compact"}) in commands
@@ -168,7 +168,7 @@ async def test_agentic_bot_commands(agentic_settings, deps):
     assert cmd_names == [
         "start",
         "new",
-        "stop",
+        "interrupt",
         "status",
         "verbose",
         "compact",

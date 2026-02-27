@@ -13,7 +13,7 @@ import structlog
 from src import __version__
 from src.bot.core import ClaudeCodeBot
 from src.claude import ClaudeIntegration
-from src.claude.client_manager import ClientManager
+from src.claude.client_manager import DEFAULT_IDLE_TIMEOUT_SECONDS, ClientManager
 from src.claude.options import OptionsBuilder
 from src.claude.sdk_integration import ClaudeSDKManager
 from src.config.features import FeatureFlags
@@ -148,6 +148,8 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     client_manager = ClientManager(
         bot_session_repo=storage.bot_sessions,
         options_builder=options_builder,
+        idle_timeout=config.session_timeout_hours * 3600
+        or DEFAULT_IDLE_TIMEOUT_SECONDS,
     )
 
     # --- Event bus and agentic platform components ---
@@ -276,9 +278,6 @@ async def run_application(app: Dict[str, Any]) -> None:
                     deactivated=sync_result.deactivated,
                 )
 
-        # Start client manager cleanup loop
-        client_manager.start_cleanup_loop()
-
         # Now wire up components that need the Telegram Bot instance
         telegram_bot = bot.app.bot
 
@@ -363,7 +362,6 @@ async def run_application(app: Dict[str, Any]) -> None:
                 await notification_service.stop()
             await event_bus.stop()
             await bot.stop()
-            client_manager.stop_cleanup_loop()
             await client_manager.disconnect_all()
             await claude_integration.shutdown()
             await storage.close()

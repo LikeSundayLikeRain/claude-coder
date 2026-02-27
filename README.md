@@ -1,7 +1,7 @@
 # Claude Code Telegram Bot
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 
 A Telegram bot that gives you remote access to [Claude Code](https://claude.ai/code). Chat naturally with Claude about your projects from anywhere -- no terminal commands needed.
 
@@ -34,7 +34,7 @@ Bot: Running tests...
 
 ### 1. Prerequisites
 
-- **Python 3.11+** -- [Download here](https://www.python.org/downloads/)
+- **Python 3.12+** -- [Download here](https://www.python.org/downloads/)
 - **Claude Code CLI** -- [Install from here](https://claude.ai/code)
 - **Telegram Bot Token** -- Get one from [@BotFather](https://t.me/botfather)
 
@@ -60,7 +60,7 @@ pip install git+https://github.com/RichardAtCT/claude-code-telegram@latest
 ```bash
 git clone https://github.com/RichardAtCT/claude-code-telegram.git
 cd claude-code-telegram
-make dev  # requires Poetry
+make dev
 ```
 
 > **Note:** Always install from a tagged release (not `main`) for stability. See [Releases](https://github.com/RichardAtCT/claude-code-telegram/releases) for available versions.
@@ -188,10 +188,9 @@ Enable with `ENABLE_API_SERVER=true` and `ENABLE_SCHEDULER=true`. See [docs/setu
 
 - Conversational agentic mode (default) with natural language interaction
 - Classic terminal-like mode with 13 commands and inline keyboards
-- Full Claude Code integration with SDK (primary) and CLI (fallback)
+- Full Claude Code SDK integration with actor-based client lifecycle
 - Automatic session persistence per user/project directory
 - Multi-layer authentication (whitelist + optional token-based)
-- Rate limiting with token bucket algorithm
 - Directory sandboxing with path traversal prevention
 - File upload handling with archive extraction
 - Image/screenshot upload with analysis
@@ -199,7 +198,6 @@ Enable with `ENABLE_API_SERVER=true` and `ENABLE_SCHEDULER=true`. See [docs/setu
 - Quick actions system with context-aware buttons
 - Session export in Markdown, HTML, and JSON formats
 - SQLite persistence with migrations
-- Usage and cost tracking
 - Audit logging and security event tracking
 - Event bus for decoupled message routing
 - Webhook API server (GitHub HMAC-SHA256, generic Bearer token auth)
@@ -230,16 +228,11 @@ ALLOWED_USERS=123456789          # Comma-separated Telegram user IDs
 ```bash
 # Claude
 ANTHROPIC_API_KEY=sk-ant-...     # API key (optional if using CLI auth)
-CLAUDE_MAX_COST_PER_USER=10.0    # Spending limit per user (USD)
 CLAUDE_TIMEOUT_SECONDS=300       # Operation timeout
 
 # Mode
 AGENTIC_MODE=true                # Agentic (default) or classic mode
 VERBOSE_LEVEL=1                  # 0=quiet, 1=normal (default), 2=detailed
-
-# Rate Limiting
-RATE_LIMIT_REQUESTS=10           # Requests per window
-RATE_LIMIT_WINDOW=60             # Window in seconds
 
 # Features (classic mode)
 ENABLE_GIT_INTEGRATION=true
@@ -305,14 +298,8 @@ Message [@userinfobot](https://t.me/userinfobot) on Telegram -- it will reply wi
 - Check bot logs with `make run-debug`
 
 **Claude integration not working:**
-- SDK mode (default): Check `claude auth status` or verify `ANTHROPIC_API_KEY`
-- CLI mode: Verify `claude --version` and `claude auth status`
+- Check `claude auth status` or verify `ANTHROPIC_API_KEY`
 - Check `CLAUDE_ALLOWED_TOOLS` includes necessary tools (see [docs/tools.md](docs/tools.md) for the full reference)
-
-**High usage costs:**
-- Adjust `CLAUDE_MAX_COST_PER_USER` to set spending limits
-- Monitor usage with `/status`
-- Use shorter, more focused requests
 
 ## Security
 
@@ -320,7 +307,6 @@ This bot implements defense-in-depth security:
 
 - **Access Control** -- Whitelist-based user authentication
 - **Directory Isolation** -- Sandboxing to approved directories
-- **Rate Limiting** -- Request and cost-based limits
 - **Input Validation** -- Injection and path traversal protection
 - **Webhook Authentication** -- GitHub HMAC-SHA256 and Bearer token verification
 - **Audit Logging** -- Complete tracking of all user actions
@@ -358,7 +344,7 @@ Each command commits, tags, and pushes automatically, triggering CI tests and a 
 3. Make changes with tests: `make test && make lint`
 4. Submit a Pull Request
 
-**Code standards:** Python 3.11+, Black formatting (88 chars), type hints required, pytest with >85% coverage.
+**Code standards:** Python 3.12+, Black formatting (88 chars), type hints required, pytest with >85% coverage.
 
 ## License
 

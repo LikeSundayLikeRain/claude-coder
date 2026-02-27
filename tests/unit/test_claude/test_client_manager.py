@@ -37,8 +37,9 @@ def _make_mock_user_client(
     client.betas = None
     client.is_connected = connected
     client.is_querying = False
-    client.connect = AsyncMock()
-    client.disconnect = AsyncMock()
+    client.start = AsyncMock()
+    client.stop = AsyncMock()
+    client.submit = AsyncMock()
     client.interrupt = AsyncMock()
     return client
 
@@ -48,7 +49,7 @@ class TestGetOrConnect:
 
     @pytest.mark.asyncio
     async def test_get_or_connect_creates_new_client(self) -> None:
-        """Creates UserClient, connects it, stores in _clients dict."""
+        """Creates UserClient, starts it, stores in _clients dict."""
         repo = _make_mock_bot_session_repo()
         builder = _make_mock_options_builder()
         mock_client = _make_mock_user_client()
@@ -58,12 +59,10 @@ class TestGetOrConnect:
                 bot_session_repo=repo,
                 options_builder=builder,
             )
-            result = await manager.get_or_connect(
-                user_id=1, directory="/some/dir"
-            )
+            result = await manager.get_or_connect(user_id=1, directory="/some/dir")
 
         assert result is mock_client
-        mock_client.connect.assert_awaited_once()
+        mock_client.start.assert_awaited_once()
         assert manager._clients[1] is mock_client
 
     @pytest.mark.asyncio
@@ -89,12 +88,12 @@ class TestGetOrConnect:
         assert first is second
         # UserClient constructor only called once
         assert mock_cls.call_count == 1
-        # connect only called once
-        assert mock_client.connect.await_count == 1
+        # start only called once
+        assert mock_client.start.await_count == 1
 
     @pytest.mark.asyncio
     async def test_get_or_connect_reconnects_on_directory_change(self) -> None:
-        """Disconnects old client and creates new one when directory changes."""
+        """Stops old client and creates new one when directory changes."""
         repo = _make_mock_bot_session_repo()
         builder = _make_mock_options_builder()
         old_client = _make_mock_user_client(directory="/old/dir")
@@ -110,7 +109,7 @@ class TestGetOrConnect:
             await manager.get_or_connect(user_id=1, directory="/old/dir")
             result = await manager.get_or_connect(user_id=1, directory="/new/dir")
 
-        old_client.disconnect.assert_awaited_once()
+        old_client.stop.assert_awaited_once()
         assert result is new_client
         assert manager._clients[1] is new_client
 
@@ -149,7 +148,7 @@ class TestDisconnect:
 
     @pytest.mark.asyncio
     async def test_disconnect(self) -> None:
-        """Disconnects and removes from _clients."""
+        """Stops and removes from _clients."""
         repo = _make_mock_bot_session_repo()
         builder = _make_mock_options_builder()
         mock_client = _make_mock_user_client()
@@ -164,12 +163,12 @@ class TestDisconnect:
 
             await manager.disconnect(1)
 
-        mock_client.disconnect.assert_awaited_once()
+        mock_client.stop.assert_awaited_once()
         assert 1 not in manager._clients
 
     @pytest.mark.asyncio
     async def test_disconnect_all(self) -> None:
-        """Disconnects all clients."""
+        """Stops all clients."""
         repo = _make_mock_bot_session_repo()
         builder = _make_mock_options_builder()
         client_a = _make_mock_user_client(directory="/dir/a")
@@ -186,8 +185,8 @@ class TestDisconnect:
             await manager.get_or_connect(user_id=2, directory="/dir/b")
             await manager.disconnect_all()
 
-        client_a.disconnect.assert_awaited_once()
-        client_b.disconnect.assert_awaited_once()
+        client_a.stop.assert_awaited_once()
+        client_b.stop.assert_awaited_once()
         assert len(manager._clients) == 0
 
 
@@ -256,7 +255,7 @@ class TestSwitchSession:
 
     @pytest.mark.asyncio
     async def test_switch_session(self) -> None:
-        """Disconnects current, connects new session."""
+        """Stops current, starts new session."""
         repo = _make_mock_bot_session_repo()
         builder = _make_mock_options_builder()
         old_client = _make_mock_user_client(directory="/dir", session_id="old-sess")
@@ -276,8 +275,8 @@ class TestSwitchSession:
                 directory="/dir",
             )
 
-        old_client.disconnect.assert_awaited_once()
-        new_client.connect.assert_awaited_once()
+        old_client.stop.assert_awaited_once()
+        new_client.start.assert_awaited_once()
         assert result is new_client
 
 
@@ -356,45 +355,21 @@ class TestUpdateSessionId:
         mock_repo.upsert.assert_awaited_once()
 
 
-class TestCleanupIdle:
-    """Test _cleanup_idle() disconnects stale clients and skips querying ones."""
+class TestOnClientExit:
+    """Test _on_client_exit removes client from dict."""
 
-    @pytest.mark.asyncio
-    async def test_cleanup_idle_disconnects_stale_clients(
-        self, manager: ClientManager, mock_repo: MagicMock
-    ) -> None:
-        """_cleanup_idle disconnects clients past idle timeout."""
-        from datetime import timedelta
+    def test_on_client_exit_removes_client(self) -> None:
+        repo = _make_mock_bot_session_repo()
+        manager = ClientManager(bot_session_repo=repo)
+        mock_client = _make_mock_user_client()
+        manager._clients[42] = mock_client
 
-        stale_client = _make_mock_user_client()
-        stale_client.last_active = datetime.now(UTC) - timedelta(hours=2)
-        stale_client.is_querying = False
-        stale_client.disconnect = AsyncMock()
-        manager._clients[1] = stale_client
+        manager._on_client_exit(42)
 
-        active_client = _make_mock_user_client()
-        active_client.last_active = datetime.now(UTC)
-        active_client.is_querying = False
-        manager._clients[2] = active_client
+        assert 42 not in manager._clients
 
-        await manager._cleanup_idle()
-
-        stale_client.disconnect.assert_awaited_once()
-        assert 1 not in manager._clients
-        assert 2 in manager._clients
-
-    @pytest.mark.asyncio
-    async def test_cleanup_idle_skips_querying_clients(
-        self, manager: ClientManager, mock_repo: MagicMock
-    ) -> None:
-        """_cleanup_idle does not disconnect clients that are querying."""
-        from datetime import timedelta
-
-        querying_client = _make_mock_user_client()
-        querying_client.last_active = datetime.now(UTC) - timedelta(hours=2)
-        querying_client.is_querying = True
-        manager._clients[1] = querying_client
-
-        await manager._cleanup_idle()
-
-        assert 1 in manager._clients  # not disconnected
+    def test_on_client_exit_noop_for_unknown_user(self) -> None:
+        repo = _make_mock_bot_session_repo()
+        manager = ClientManager(bot_session_repo=repo)
+        # Should not raise
+        manager._on_client_exit(999)
