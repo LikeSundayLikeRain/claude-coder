@@ -72,7 +72,7 @@ Bot: Working... (5s)
      📖 Read: utils.py
      💬 I'll add type annotations to all functions
      ✏️ Edit: utils.py
-     💻 Bash: poetry run mypy src/utils.py
+     💻 Bash: uv run mypy src/utils.py
 Bot: [Claude shows the changes and type-check results]
 ```
 

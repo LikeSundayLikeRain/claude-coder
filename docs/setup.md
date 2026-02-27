@@ -7,7 +7,7 @@
 - **Python 3.11+** -- [Download here](https://www.python.org/downloads/)
 - **Telegram Bot Token** -- Get one from [@BotFather](https://t.me/botfather)
 - **Claude Authentication** -- Choose one method below
-- **For source installs:** [Poetry](https://python-poetry.org/docs/#installation)
+- **For source installs:** [uv](https://docs.astral.sh/uv/getting-started/installation/)
 
 ### 2. Claude Authentication Setup
 

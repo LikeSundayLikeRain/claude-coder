@@ -17,7 +17,7 @@ This project is currently under active development with the following status:
 ### Prerequisites
 
 - Python 3.11 or higher
-- Poetry for dependency management
+- uv for dependency management
 - Git for version control
 
 ### Setting Up Development Environment
@@ -290,8 +290,8 @@ What you expected to happen.
 
 **Environment**
 - OS: [e.g. macOS, Linux]
-- Python version: [e.g. 3.9]
-- Poetry version: [e.g. 1.7.1]
+- Python version: [e.g. 3.11]
+- uv version: [e.g. 0.1.0]
 
 **Additional context**
 Any other context about the problem.
@@ -336,8 +336,8 @@ Instead:
 
 ### Required Tools
 
-- **Poetry**: Dependency management
-- **Black**: Code formatting  
+- **uv**: Dependency management
+- **Black**: Code formatting
 - **isort**: Import sorting
 - **flake8**: Linting
 - **mypy**: Type checking
@@ -357,7 +357,7 @@ Instead:
 ```
 
 #### PyCharm
-- Configure Poetry interpreter
+- Configure uv virtual environment as interpreter
 - Enable Black formatting
 - Enable flake8 and mypy inspections
 
@@ -394,7 +394,7 @@ Instead:
 ### Debugging
 - Use `make run-debug` for detailed logging
 - Check test output with `make test`
-- Run type checking with `poetry run mypy src`
+- Run type checking with `uv run mypy src`
 
 ## Recognition
 

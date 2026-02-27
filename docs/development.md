@@ -7,7 +7,7 @@ This document provides detailed information for developers working on the Claude
 ### Prerequisites
 
 - Python 3.11 or higher
-- Poetry for dependency management
+- uv for dependency management
 - Git for version control
 - Claude authentication (one of):
   - Claude Code CLI installed and authenticated
@@ -21,9 +21,9 @@ This document provides detailed information for developers working on the Claude
    cd claude-code-telegram
    ```
 
-2. **Install Poetry** (if not already installed):
+2. **Install uv** (if not already installed):
    ```bash
-   pip install poetry
+   curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
 3. **Install dependencies**:
@@ -33,7 +33,7 @@ This document provides detailed information for developers working on the Claude
 
 4. **Set up pre-commit hooks** (optional but recommended):
    ```bash
-   poetry run pre-commit install
+   uv run pre-commit install
    ```
 
 5. **Create configuration file**:
@@ -46,9 +46,10 @@ This document provides detailed information for developers working on the Claude
 
 ### Daily Development
 
-1. **Activate the Poetry environment**:
+1. **Run commands with uv**:
    ```bash
-   poetry shell
+   # Commands automatically use the venv via uv run
+   uv run pytest tests/
    ```
 
 2. **Run tests continuously during development**:
@@ -390,7 +391,7 @@ make bump-minor    # 1.2.0 -> 1.3.0
 make bump-major    # 1.2.0 -> 2.0.0
 ```
 
-`make bump-*` runs `poetry version`, commits `pyproject.toml`, creates a git tag, and pushes both to GitHub. The tag push triggers the release workflow:
+`make bump-*` updates version in `pyproject.toml`, commits the change, creates a git tag, and pushes both to GitHub. The tag push triggers the release workflow:
 
 1. Runs the full lint + test suite
 2. Creates a GitHub Release with auto-generated release notes
@@ -497,15 +498,15 @@ test: add tests for authentication system
 
 ### Common Issues
 
-1. **Import errors**: Make sure you're in the Poetry environment (`poetry shell`)
+1. **Import errors**: Make sure dependencies are installed (`make dev`)
 
 2. **Configuration validation errors**: Check that required environment variables are set
 
 3. **Test failures**: Ensure test dependencies are installed (`make dev`)
 
-4. **Type checking errors**: Run `poetry run mypy src` to see detailed errors
+4. **Type checking errors**: Run `uv run mypy src` to see detailed errors
 
-5. **Poetry issues**: Try `poetry lock --no-update` to fix lock file issues
+5. **Dependency issues**: Run `uv sync` to sync dependencies
 
 ### Getting Help
 

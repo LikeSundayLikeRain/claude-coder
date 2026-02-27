@@ -23,7 +23,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/home/ubuntu/Code/oss/claude-code-telegram
-ExecStart=/home/ubuntu/.local/bin/poetry run claude-telegram-bot
+ExecStart=/home/ubuntu/.local/bin/uv run claude-telegram-bot
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -126,12 +126,12 @@ journalctl --user -u claude-telegram-bot -n 100
 # Verify paths in service file are correct
 systemctl --user cat claude-telegram-bot
 
-# Check that Poetry is installed
-poetry --version
+# Check that uv is installed
+uv --version
 
 # Test the bot manually first
 cd /home/ubuntu/Code/oss/claude-code-telegram
-poetry run claude-telegram-bot
+uv run claude-telegram-bot
 ```
 
 **Service stops after logout:**

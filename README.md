@@ -27,7 +27,8 @@ Bot: I'll analyze src/api.py and add error handling...
 
 You: Looks good. Now run the tests to make sure nothing broke.
 
-Bot: Running pytest...
+Bot: Running tests...
+     💻 Bash: uv run pytest tests/ -v
      All 47 tests passed. The error handling changes are working correctly.
 ```
 
@@ -114,7 +115,7 @@ Bot: Working... (8s)
      📖 Read: http_client.py
      💬 I'll add a retry decorator with exponential backoff
      ✏️ Edit: http_client.py
-     💻 Bash: poetry run pytest tests/ -v
+     💻 Bash: uv run pytest tests/ -v
 Bot: [Claude shows the changes and test results]
 
 You: /verbose 0
