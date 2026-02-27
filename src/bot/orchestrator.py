@@ -27,6 +27,7 @@ from ..claude.history import (
     append_history_entry,
     check_history_format_health,
     filter_by_directory,
+    find_session_by_id,
     read_claude_history,
     read_session_transcript,
 )
@@ -302,6 +303,7 @@ class MessageOrchestrator:
             ("model", self.handle_model),
             ("repo", self.agentic_repo),
             ("sessions", self.agentic_sessions),
+            ("resume", self.agentic_resume),
             ("commands", self.agentic_commands),
         ]
         if self.settings.enable_project_threads:
@@ -414,6 +416,7 @@ class MessageOrchestrator:
                 BotCommand("model", "Switch Claude model"),
                 BotCommand("repo", "List repos / switch workspace"),
                 BotCommand("sessions", "Choose a session to resume"),
+                BotCommand("resume", "Resume a session by ID"),
                 BotCommand("commands", "Browse available skills"),
             ]
             if self.settings.enable_project_threads:
@@ -1141,6 +1144,15 @@ class MessageOrchestrator:
                                 skill_name=skill.name,
                                 user_id=user_id,
                             )
+
+        # Sync from active client (e.g. after API-driven /resume)
+        _cm: Optional[ClientManager] = context.bot_data.get("client_manager")
+        if _cm:
+            _active = _cm.get_active_client(user_id)
+            if _active and _active.is_connected:
+                context.user_data["current_directory"] = Path(_active.directory)
+                if _active.session_id:
+                    context.user_data["claude_session_id"] = _active.session_id
 
         # Restore persisted directory if not already set
         storage = context.bot_data.get("storage")
@@ -1873,6 +1885,108 @@ class MessageOrchestrator:
             parse_mode="Markdown",
             reply_markup=reply_markup,
         )
+
+    async def agentic_resume(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Resume a session by its ID, with transcript preview."""
+        if not update.message or not update.message.text:
+            return
+
+        # Delete the /resume command message for a clean chat experience
+        chat_id = update.message.chat_id
+        try:
+            await update.message.delete()
+        except Exception:
+            pass  # may lack delete permission in groups
+
+        parts = update.message.text.strip().split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Usage: /resume <session_id>",
+                parse_mode="HTML",
+            )
+            return
+
+        session_id = parts[1].strip()
+        user_id = update.effective_user.id
+
+        # Look up session in history to get project directory
+        history_entries = read_claude_history()
+        entry = find_session_by_id(history_entries, session_id)
+
+        if entry is None:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Session not found in history.",
+                parse_mode="HTML",
+            )
+            audit_logger = context.bot_data.get("audit_logger")
+            if audit_logger:
+                await audit_logger.log_command(
+                    user_id=user_id,
+                    command="resume",
+                    args=[session_id],
+                    success=False,
+                )
+            return
+
+        # Set session and directory in user context
+        context.user_data["claude_session_id"] = session_id
+        context.user_data["current_directory"] = Path(entry.project)
+
+        # Switch active client if one exists (stops old, connects new)
+        client_manager = context.bot_data.get("client_manager")
+        if client_manager:
+            try:
+                await client_manager.switch_session(
+                    user_id=user_id,
+                    session_id=session_id,
+                    directory=entry.project,
+                    approved_directory=str(self.settings.approved_directories[0]),
+                )
+            except Exception:
+                logger.debug("session_switch_deferred", session_id=session_id)
+
+        # Build transcript preview
+        lines: list[str] = ["\U0001f4c2 <b>Session resumed</b>\n"]
+
+        try:
+            transcript = read_session_transcript(
+                session_id=session_id,
+                project_dir=entry.project,
+                limit=3,
+            )
+            if transcript:
+                lines.append("<b>Recent:</b>")
+                for msg in transcript:
+                    preview = msg.text[:120]
+                    if len(msg.text) > 120:
+                        preview += "\u2026"
+                    label = "You" if msg.role == "user" else "Claude"
+                    lines.append(
+                        f"  <b>{label}:</b> {escape_html(preview)}"
+                    )
+        except Exception:
+            logger.debug("transcript_preview_failed", session_id=session_id)
+
+        lines.append("\nSend your next message to continue.")
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="\n".join(lines),
+            parse_mode="HTML",
+        )
+
+        audit_logger = context.bot_data.get("audit_logger")
+        if audit_logger:
+            await audit_logger.log_command(
+                user_id=user_id,
+                command="resume",
+                args=[session_id],
+                success=True,
+            )
 
     async def _agentic_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

@@ -146,6 +146,35 @@ class ClientManager:
             approved_directory=approved_directory,
         )
 
+    async def set_next_session(
+        self,
+        user_id: int,
+        session_id: str,
+        directory: str,
+        model: Optional[str] = None,
+        betas: Optional[list[str]] = None,
+    ) -> None:
+        """Disconnect current client and persist session for lazy reconnect.
+
+        Unlike switch_session(), this does NOT eagerly connect to the SDK.
+        The next user message will trigger get_or_connect() which picks up
+        the persisted session from the database.
+        """
+        await self.disconnect(user_id)
+        await self._bot_session_repo.upsert(
+            user_id=user_id,
+            session_id=session_id,
+            directory=directory,
+            model=model,
+            betas=betas,
+        )
+        logger.info(
+            "client_manager_next_session_set",
+            user_id=user_id,
+            session_id=session_id,
+            directory=directory,
+        )
+
     async def interrupt(self, user_id: int) -> None:
         """Interrupt active query for the given user."""
         client = self._clients.get(user_id)

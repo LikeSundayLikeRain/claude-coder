@@ -160,6 +160,19 @@ def filter_by_directory(
     return filtered
 
 
+def find_session_by_id(
+    entries: list[HistoryEntry], session_id: str
+) -> Optional[HistoryEntry]:
+    """Find a specific session entry by its ID.
+
+    Returns the first matching entry, or None if not found.
+    """
+    for entry in entries:
+        if entry.session_id == session_id:
+            return entry
+    return None
+
+
 def check_history_format_health(history_path: Path) -> Optional[str]:
     """Check if more than 50% of lines are malformed.
 
