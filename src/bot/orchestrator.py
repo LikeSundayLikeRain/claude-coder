@@ -842,16 +842,22 @@ class MessageOrchestrator:
         elapsed = time.time() - start_time
         lines: List[str] = [f"Working... ({elapsed:.0f}s)\n"]
 
-        for entry in activity_log[-15:]:  # Show last 15 entries max
+        # Show tool entries + only the most recent text entry
+        max_entries = 15
+        recent = activity_log[-max_entries:]
+        for entry in recent:
             kind = entry.get("kind", "tool")
             if kind == "text":
-                # Claude's intermediate reasoning/commentary
-                snippet = entry.get("detail", "")
+                # Claude's accumulated reasoning — show one clean line
+                snippet = entry.get("detail", "").strip()
+                if not snippet:
+                    continue
+                # Take first meaningful line, truncate
+                first_line = snippet.split("\n", 1)[0].strip()
                 if verbose_level >= 2:
-                    lines.append(f"\U0001f4ac {snippet}")
+                    lines.append(f"\U0001f4ac {first_line[:150]}")
                 else:
-                    # Level 1: one short line
-                    lines.append(f"\U0001f4ac {snippet[:80]}")
+                    lines.append(f"\U0001f4ac {first_line[:80]}")
             else:
                 # Tool call
                 icon = _tool_icon(entry["name"])
@@ -860,8 +866,8 @@ class MessageOrchestrator:
                 else:
                     lines.append(f"{icon} {entry['name']}")
 
-        if len(activity_log) > 15:
-            lines.insert(1, f"... ({len(activity_log) - 15} earlier entries)\n")
+        if len(activity_log) > max_entries:
+            lines.insert(1, f"... ({len(activity_log) - max_entries} earlier entries)\n")
 
         return "\n".join(lines)
 
@@ -1052,13 +1058,18 @@ class MessageOrchestrator:
                     tool_log.append({"kind": "tool", "name": name, "detail": detail})
 
             # Capture assistant text (reasoning / commentary)
+            # Accumulate consecutive text deltas into a single entry
+            # to avoid flooding the progress display with word fragments.
             if update_obj.type == "assistant" and update_obj.content:
-                text = update_obj.content.strip()
+                text = update_obj.content
                 if text and verbose_level >= 1:
-                    # Collapse to first meaningful line, cap length
-                    first_line = text.split("\n", 1)[0].strip()
-                    if first_line:
-                        tool_log.append({"kind": "text", "detail": first_line[:120]})
+                    # Append to last text entry if it exists, else create new
+                    if tool_log and tool_log[-1].get("kind") == "text":
+                        tool_log[-1]["detail"] = (
+                            tool_log[-1]["detail"] + text
+                        )[:200]
+                    else:
+                        tool_log.append({"kind": "text", "detail": text[:200]})
 
             # Throttle progress message edits to avoid Telegram rate limits
             now = time.time()
