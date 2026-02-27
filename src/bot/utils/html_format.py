@@ -64,6 +64,61 @@ def markdown_to_telegram_html(text: str) -> str:
         flags=re.DOTALL,
     )
 
+    # --- 1b. Convert markdown tables to <pre> blocks ---
+    def _replace_table(m: re.Match) -> str:  # type: ignore[type-arg]
+        table_text = m.group(0)
+        rows = [row.strip() for row in table_text.strip().split("\n")]
+        parsed_rows = []
+        for row in rows:
+            # Strip leading/trailing pipes and split
+            cells = [c.strip() for c in row.strip("|").split("|")]
+            parsed_rows.append(cells)
+
+        if len(parsed_rows) < 2:
+            return table_text  # Not a valid table
+
+        # Skip separator row (row with only dashes/colons)
+        data_rows = [
+            r
+            for r in parsed_rows
+            if not all(re.match(r"^[:\-]+$", c.strip()) for c in r)
+        ]
+
+        if not data_rows:
+            return table_text
+
+        # Calculate column widths
+        num_cols = max(len(r) for r in data_rows)
+        col_widths = [0] * num_cols
+        for row in data_rows:
+            for i, cell in enumerate(row):
+                if i < num_cols:
+                    col_widths[i] = max(col_widths[i], len(cell))
+
+        # Build aligned output
+        lines = []
+        for row_idx, row in enumerate(data_rows):
+            padded = []
+            for i in range(num_cols):
+                cell = row[i] if i < len(row) else ""
+                padded.append(cell.ljust(col_widths[i]))
+            lines.append("  ".join(padded))
+            # Add separator after header
+            if row_idx == 0 and len(data_rows) > 1:
+                sep = "  ".join("─" * w for w in col_widths)
+                lines.append(sep)
+
+        pre_content = escape_html("\n".join(lines))
+        return _make_placeholder(f"<pre>{pre_content}</pre>")
+
+    # Match consecutive lines that look like table rows (start/end with |)
+    text = re.sub(
+        r"(?:^[ \t]*\|.+\|[ \t]*$\n?){2,}",
+        _replace_table,
+        text,
+        flags=re.MULTILINE,
+    )
+
     # --- 2. Extract inline code ---
     def _replace_inline_code(m: re.Match) -> str:  # type: ignore[type-arg]
         code = m.group(1)
