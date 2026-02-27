@@ -5,11 +5,13 @@ Receives external webhooks and publishes them as events on the bus.
 """
 
 import uuid
+from html import escape as html_escape
 from typing import Any, Dict, Optional
 
 import structlog
 from fastapi import FastAPI, Header, HTTPException, Request
 
+from ..claude.history import find_session_by_id, read_claude_history, read_session_transcript
 from ..config.settings import Settings
 from ..events.bus import EventBus
 from ..events.types import WebhookEvent
@@ -23,6 +25,7 @@ def create_api_app(
     event_bus: EventBus,
     settings: Settings,
     db_manager: Optional[DatabaseManager] = None,
+    client_manager: Any = None,
 ) -> FastAPI:
     """Create the FastAPI application."""
 
@@ -36,6 +39,102 @@ def create_api_app(
     @app.get("/health")
     async def health_check() -> Dict[str, str]:
         return {"status": "ok"}
+
+    @app.post("/api/resume")
+    async def resume_session(
+        request: Request,
+        authorization: Optional[str] = Header(None),
+    ) -> Dict[str, Any]:
+        """Silently resume a Claude Code session by ID.
+
+        Switches the active client, sends a Telegram confirmation with
+        transcript preview, and returns the result.
+        """
+        import httpx
+
+        # Authenticate
+        secret = settings.webhook_api_secret
+        if not secret:
+            raise HTTPException(status_code=500, detail="API secret not configured")
+        if not verify_shared_secret(authorization, secret):
+            raise HTTPException(status_code=401, detail="Invalid authorization")
+
+        # Parse request body
+        payload: Dict[str, Any] = await request.json()
+        session_id = str(payload.get("session_id", "")).strip()
+        chat_id = payload.get("chat_id")
+
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id required")
+        if not chat_id:
+            raise HTTPException(status_code=400, detail="chat_id required")
+
+        # Look up session in history
+        history_entries = read_claude_history()
+        entry = find_session_by_id(history_entries, session_id)
+
+        if entry is None:
+            return {"status": "not_found", "error": "Session not found in history"}
+
+        # Switch active client (stops old session, connects new)
+        if client_manager:
+            try:
+                await client_manager.switch_session(
+                    user_id=int(chat_id),
+                    session_id=session_id,
+                    directory=entry.project,
+                )
+            except Exception as exc:
+                logger.warning("resume_switch_session_failed", error=str(exc))
+
+        # Build transcript preview
+        lines: list[str] = ["\U0001f4c2 <b>Session resumed</b>\n"]
+        try:
+            transcript = read_session_transcript(
+                session_id=session_id,
+                project_dir=entry.project,
+                limit=3,
+            )
+            if transcript:
+                lines.append("<b>Recent:</b>")
+                for msg in transcript:
+                    preview = msg.text[:120] + ("\u2026" if len(msg.text) > 120 else "")
+                    label = "You" if msg.role == "user" else "Claude"
+                    lines.append(f"  <b>{label}:</b> {html_escape(preview)}")
+        except Exception:
+            pass
+
+        lines.append("\nSend your next message to continue.")
+
+        # Send Telegram confirmation
+        bot_token = settings.telegram_bot_token.get_secret_value()
+        tg_error: Optional[str] = None
+        async with httpx.AsyncClient() as http:
+            tg_resp = await http.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={
+                    "chat_id": int(chat_id),
+                    "text": "\n".join(lines),
+                    "parse_mode": "HTML",
+                },
+            )
+            tg_body = tg_resp.json()
+            if not tg_body.get("ok"):
+                tg_error = tg_body.get("description", "unknown Telegram error")
+                logger.warning(
+                    "resume_telegram_send_failed",
+                    status_code=tg_resp.status_code,
+                    error=tg_error,
+                )
+
+        result: Dict[str, Any] = {
+            "status": "success",
+            "session_id": session_id,
+            "project": entry.project,
+        }
+        if tg_error:
+            result["telegram_error"] = tg_error
+        return result
 
     @app.post("/webhooks/{provider}")
     async def receive_webhook(
@@ -176,11 +275,12 @@ async def run_api_server(
     event_bus: EventBus,
     settings: Settings,
     db_manager: Optional[DatabaseManager] = None,
+    client_manager: Any = None,
 ) -> None:
     """Run the FastAPI server using uvicorn."""
     import uvicorn
 
-    app = create_api_app(event_bus, settings, db_manager)
+    app = create_api_app(event_bus, settings, db_manager, client_manager)
 
     config = uvicorn.Config(
         app=app,
