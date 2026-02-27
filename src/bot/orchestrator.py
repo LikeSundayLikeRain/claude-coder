@@ -1120,7 +1120,7 @@ class MessageOrchestrator:
                         # This is a skill invocation — load and resolve it
                         body = load_skill_body(skill)
                         if body:
-                            session_id = context.user_data.get("claude_session_id", "")
+                            session_id = context.user_data.get("claude_session_id") or ""
                             resolved = resolve_skill_prompt(
                                 body, skill_args, session_id
                             )
@@ -2030,7 +2030,7 @@ class MessageOrchestrator:
                 )
                 return
 
-            session_id = context.user_data.get("claude_session_id", "")
+            session_id = context.user_data.get("claude_session_id") or ""
             prompt = resolve_skill_prompt(body, "", session_id)
 
             # Show running message

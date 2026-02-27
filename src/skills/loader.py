@@ -433,6 +433,6 @@ def resolve_skill_prompt(body: str, arguments: str, session_id: str) -> str:
     result = result.replace("$ARGUMENTS", arguments)
 
     # Replace ${CLAUDE_SESSION_ID} with session ID
-    result = result.replace("${CLAUDE_SESSION_ID}", session_id)
+    result = result.replace("${CLAUDE_SESSION_ID}", session_id or "")
 
     return result
