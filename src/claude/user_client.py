@@ -170,6 +170,16 @@ class UserClient:
                 self._sdk_client = None
             self._running = False
             self._querying = False
+            # Drain any pending work items so their futures don't hang forever
+            while not self._queue.empty():
+                try:
+                    pending = self._queue.get_nowait()
+                    if pending is not None and not pending.future.done():
+                        pending.future.set_exception(
+                            RuntimeError("UserClient worker stopped")
+                        )
+                except asyncio.QueueEmpty:
+                    break
             logger.info("user_client_stopped", user_id=self.user_id)
             if self._on_exit:
                 try:
