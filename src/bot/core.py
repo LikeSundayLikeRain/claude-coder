@@ -97,7 +97,6 @@ class ClaudeCodeBot:
     def _add_middleware(self) -> None:
         """Add middleware to application."""
         from .middleware.auth import auth_middleware
-        from .middleware.rate_limit import rate_limit_middleware
         from .middleware.security import security_middleware
 
         # Middleware runs in order of group numbers (lower = earlier)
@@ -115,14 +114,6 @@ class ClaudeCodeBot:
                 filters.ALL, self._create_middleware_handler(auth_middleware)
             ),
             group=-2,
-        )
-
-        # Rate limiting third
-        self.app.add_handler(
-            MessageHandler(
-                filters.ALL, self._create_middleware_handler(rate_limit_middleware)
-            ),
-            group=-1,
         )
 
         logger.info("Middleware added to bot")

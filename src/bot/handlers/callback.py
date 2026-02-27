@@ -643,27 +643,11 @@ async def _handle_status_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     relative_path = current_dir.relative_to(settings.approved_directory)
 
-    # Get usage info if rate limiter is available
-    rate_limiter = context.bot_data.get("rate_limiter")
-    usage_info = ""
-    if rate_limiter:
-        try:
-            user_status = rate_limiter.get_user_status(user_id)
-            cost_usage = user_status.get("cost_usage", {})
-            current_cost = cost_usage.get("current", 0.0)
-            cost_limit = cost_usage.get("limit", settings.claude_max_cost_per_user)
-            cost_percentage = (current_cost / cost_limit) * 100 if cost_limit > 0 else 0
-
-            usage_info = f"💰 Usage: ${current_cost:.2f} / ${cost_limit:.2f} ({cost_percentage:.0f}%)\n"
-        except Exception:
-            usage_info = "💰 Usage: <i>Unable to retrieve</i>\n"
-
     status_lines = [
         "📊 <b>Session Status</b>",
         "",
         f"📂 Directory: <code>{escape_html(str(relative_path))}/</code>",
         f"🤖 Claude Session: {'✅ Active' if claude_session_id else '❌ None'}",
-        usage_info.rstrip(),
     ]
 
     if claude_session_id:

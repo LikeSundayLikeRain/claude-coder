@@ -676,24 +676,11 @@ class MessageOrchestrator:
                     session_id = active_client.session_id
                     session_line = f"<b>Session:</b> {session_id[:12]}...\n"
 
-        # Cost info
-        cost_str = ""
-        rate_limiter = context.bot_data.get("rate_limiter")
-        if rate_limiter:
-            try:
-                user_status = rate_limiter.get_user_status(update.effective_user.id)
-                cost_usage = user_status.get("cost_usage", {})
-                current_cost = cost_usage.get("current", 0.0)
-                cost_str = f"<b>Cost:</b> ${current_cost:.2f}\n"
-            except Exception:
-                pass
-
         await update.message.reply_text(
             f"{workspace_line}"
             f"<b>Directory:</b> <code>{dir_display}</code>\n"
             f"{session_line}"
-            f"{client_line}"
-            f"{cost_str}",
+            f"{client_line}",
             parse_mode="HTML",
         )
 
@@ -1208,14 +1195,6 @@ class MessageOrchestrator:
                         user_id=user_id,
                         directory=str(persisted_path),
                     )
-
-        # Rate limit check
-        rate_limiter = context.bot_data.get("rate_limiter")
-        if rate_limiter:
-            allowed, limit_message = await rate_limiter.check_rate_limit(user_id, 0.001)
-            if not allowed:
-                await update.message.reply_text(f"⏱️ {limit_message}")
-                return
 
         chat = update.message.chat
         await chat.send_action("typing")

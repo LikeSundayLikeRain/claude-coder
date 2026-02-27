@@ -286,30 +286,6 @@ class AuditLogger:
             details=details,
         )
 
-    async def log_rate_limit_exceeded(
-        self,
-        user_id: int,
-        limit_type: str,  # request, cost
-        current_usage: float,
-        limit_value: float,
-    ) -> None:
-        """Log rate limit exceeded."""
-        event = AuditEvent(
-            timestamp=datetime.now(UTC),
-            user_id=user_id,
-            event_type="rate_limit_exceeded",
-            success=False,
-            details={
-                "limit_type": limit_type,
-                "current_usage": current_usage,
-                "limit_value": limit_value,
-                "utilization": current_usage / limit_value if limit_value > 0 else 0,
-            },
-            risk_level="low",
-        )
-
-        await self.storage.store_event(event)
-
     def _assess_command_risk(self, command: str, args: List[str]) -> str:
         """Assess risk level of command execution."""
         high_risk_commands = {

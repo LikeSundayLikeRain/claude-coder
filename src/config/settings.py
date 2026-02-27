@@ -16,14 +16,10 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.utils.constants import (
-    DEFAULT_CLAUDE_MAX_COST_PER_USER,
     DEFAULT_CLAUDE_MAX_TURNS,
     DEFAULT_CLAUDE_TIMEOUT_SECONDS,
     DEFAULT_DATABASE_URL,
     DEFAULT_PROJECT_THREADS_SYNC_ACTION_INTERVAL_SECONDS,
-    DEFAULT_RATE_LIMIT_BURST,
-    DEFAULT_RATE_LIMIT_REQUESTS,
-    DEFAULT_RATE_LIMIT_WINDOW,
     DEFAULT_SESSION_TIMEOUT_HOURS,
 )
 
@@ -86,9 +82,6 @@ class Settings(BaseSettings):
     claude_timeout_seconds: int = Field(
         DEFAULT_CLAUDE_TIMEOUT_SECONDS, description="Claude timeout"
     )
-    claude_max_cost_per_user: float = Field(
-        DEFAULT_CLAUDE_MAX_COST_PER_USER, description="Max cost per user"
-    )
     # NOTE: When changing this list, also update docs/tools.md,
     # docs/configuration.md, .env.example,
     # src/claude/facade.py (_get_admin_instructions),
@@ -128,17 +121,6 @@ class Settings(BaseSettings):
     sandbox_excluded_commands: Optional[List[str]] = Field(
         default=["git", "npm", "pip", "poetry", "make", "docker"],
         description="Commands that run outside the sandbox (need system access)",
-    )
-
-    # Rate limiting
-    rate_limit_requests: int = Field(
-        DEFAULT_RATE_LIMIT_REQUESTS, description="Requests per window"
-    )
-    rate_limit_window: int = Field(
-        DEFAULT_RATE_LIMIT_WINDOW, description="Rate limit window seconds"
-    )
-    rate_limit_burst: int = Field(
-        DEFAULT_RATE_LIMIT_BURST, description="Burst capacity"
     )
 
     # Storage

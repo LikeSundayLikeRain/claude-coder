@@ -401,21 +401,6 @@ class TestAuditLogger:
         assert event.details["severity"] == "high"
         assert event.risk_level == "critical"  # High severity maps to critical risk
 
-    async def test_log_rate_limit_exceeded(self, audit_logger, storage):
-        """Test logging rate limit exceeded."""
-        await audit_logger.log_rate_limit_exceeded(
-            user_id=123, limit_type="request", current_usage=15.0, limit_value=10.0
-        )
-
-        events = await storage.get_events()
-        event = events[0]
-
-        assert event.event_type == "rate_limit_exceeded"
-        assert event.success is False
-        assert event.details["limit_type"] == "request"
-        assert event.details["current_usage"] == 15.0
-        assert event.details["utilization"] == 1.5
-
     async def test_get_user_activity_summary(self, audit_logger, storage):
         """Test getting user activity summary."""
         user_id = 123

@@ -33,7 +33,6 @@ class TestingConfig:
     approved_directory: str = "/tmp/test_projects"
     enable_telemetry: bool = False
     claude_timeout_seconds: int = 30  # Faster timeout for tests
-    rate_limit_requests: int = 1000  # No rate limiting in tests
     session_timeout_hours: int = 1  # Short session timeout for testing
 
     @classmethod
@@ -55,9 +54,6 @@ class ProductionConfig:
     development_mode: bool = False
     log_level: str = "INFO"
     enable_telemetry: bool = True
-    # Use stricter defaults for production
-    claude_max_cost_per_user: float = 5.0  # Lower cost limit
-    rate_limit_requests: int = 5  # Stricter rate limiting
     session_timeout_hours: int = 12  # Shorter session timeout
 
     @classmethod

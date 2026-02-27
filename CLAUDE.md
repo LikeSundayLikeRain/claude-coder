@@ -46,7 +46,7 @@ Sessions auto-resume: per user+directory, read from Claude CLI's `~/.claude/hist
 
 ```
 Telegram message -> Security middleware (group -3) -> Auth middleware (group -2)
--> Rate limit (group -1) -> MessageOrchestrator.agentic_text() (group 10)
+-> MessageOrchestrator.agentic_text() (group 10)
 -> ClientManager.get_or_connect() -> UserClient.query() -> SDK streaming
 -> StreamHandler extracts events -> Real-time progress sent to Telegram
 -> Final response stored in SQLite -> Sent back to Telegram
@@ -80,14 +80,14 @@ context.bot_data["security_validator"]
 
 - `src/config/` -- Pydantic Settings v2 config with env detection, feature flags (`features.py`), YAML project loader (`loader.py`)
 - `src/bot/handlers/` -- Telegram command, message, and callback handlers (classic mode + project thread commands)
-- `src/bot/middleware/` -- Auth, rate limit, security input validation
+- `src/bot/middleware/` -- Auth, security input validation
 - `src/bot/features/` -- Git integration, file handling, quick actions, session export
 - `src/bot/orchestrator.py` -- MessageOrchestrator: routes to agentic or classic handlers, project-topic routing
 - `src/claude/` -- Claude integration: `client_manager.py` (per-user clients), `user_client.py` (SDK wrapper), `options.py` (SDK options builder), `stream_handler.py` (message parsing), `session.py` (session resolver), `monitor.py` (tool monitoring), `facade.py` (classic mode)
 - `src/skills/` -- Skill/plugin discovery from `installed_plugins.json`, prefix matching, namespace resolution
 - `src/projects/` -- Multi-project support: `registry.py` (YAML project config), `thread_manager.py` (Telegram topic sync/routing)
-- `src/storage/` -- SQLite via aiosqlite, repository pattern (users, sessions, messages, tool_usage, audit_log, cost_tracking, project_threads, bot_sessions)
-- `src/security/` -- Multi-provider auth (whitelist + token), input validators (with optional `disable_security_patterns`), rate limiter, audit logging
+- `src/storage/` -- SQLite via aiosqlite, repository pattern (users, sessions, messages, tool_usage, audit_log, project_threads, bot_sessions)
+- `src/security/` -- Multi-provider auth (whitelist + token), input validators (with optional `disable_security_patterns`), audit logging
 - `src/events/` -- EventBus (async pub/sub), event types, AgentHandler, EventSecurityMiddleware
 - `src/api/` -- FastAPI webhook server, GitHub HMAC-SHA256 + Bearer token auth
 - `src/scheduler/` -- APScheduler cron jobs, persistent storage in SQLite
@@ -95,7 +95,7 @@ context.bot_data["security_validator"]
 
 ### Security Model
 
-5-layer defense: authentication (whitelist/token) -> directory isolation (APPROVED_DIRECTORY + path traversal prevention) -> input validation (blocks `..`, `;`, `&&`, `$()`, etc.) -> rate limiting (token bucket) -> audit logging.
+4-layer defense: authentication (whitelist/token) -> directory isolation (APPROVED_DIRECTORY + path traversal prevention) -> input validation (blocks `..`, `;`, `&&`, `$()`, etc.) -> audit logging.
 
 `SecurityValidator` blocks access to secrets (`.env`, `.ssh`, `id_rsa`, `.pem`) and dangerous shell patterns. Can be relaxed with `DISABLE_SECURITY_PATTERNS=true` (trusted environments only).
 

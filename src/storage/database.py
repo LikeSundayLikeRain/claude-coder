@@ -119,17 +119,6 @@ CREATE TABLE user_tokens (
     FOREIGN KEY (user_id) REFERENCES users(user_id)
 );
 
--- Cost tracking table
-CREATE TABLE cost_tracking (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    date DATE NOT NULL,
-    daily_cost REAL DEFAULT 0.0,
-    request_count INTEGER DEFAULT 0,
-    UNIQUE(user_id, date),
-    FOREIGN KEY (user_id) REFERENCES users(user_id)
-);
-
 -- Indexes for performance
 CREATE INDEX idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX idx_sessions_project_path ON sessions(project_path);
@@ -137,7 +126,6 @@ CREATE INDEX idx_messages_session_id ON messages(session_id);
 CREATE INDEX idx_messages_timestamp ON messages(timestamp);
 CREATE INDEX idx_audit_log_user_id ON audit_log(user_id);
 CREATE INDEX idx_audit_log_timestamp ON audit_log(timestamp);
-CREATE INDEX idx_cost_tracking_user_date ON cost_tracking(user_id, date);
 """
 
 

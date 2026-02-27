@@ -72,9 +72,6 @@ def mock_deps(mock_storage):
         error=None,
     ))
 
-    rate_limiter = MagicMock()
-    rate_limiter.check_rate_limit = AsyncMock(return_value=(True, ""))
-
     audit_logger = MagicMock()
     audit_logger.log_command = AsyncMock()
 
@@ -82,7 +79,6 @@ def mock_deps(mock_storage):
         "claude_integration": claude_integration,
         "storage": mock_storage,
         "security_validator": MagicMock(),
-        "rate_limiter": rate_limiter,
         "audit_logger": audit_logger,
     }
 

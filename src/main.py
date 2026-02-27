@@ -32,7 +32,6 @@ from src.security.auth import (
     TokenAuthProvider,
     WhitelistAuthProvider,
 )
-from src.security.rate_limiter import RateLimiter
 from src.security.validators import SecurityValidator
 from src.storage.facade import Storage
 
@@ -128,8 +127,6 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         approved_directories=config.approved_directories,
         disable_security_patterns=config.disable_security_patterns,
     )
-    rate_limiter = RateLimiter(config)
-
     # Create audit storage and logger
     audit_storage = InMemoryAuditStorage()  # TODO: Use database storage in production
     audit_logger = AuditLogger(audit_storage)
@@ -177,7 +174,6 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     dependencies = {
         "auth_manager": auth_manager,
         "security_validator": security_validator,
-        "rate_limiter": rate_limiter,
         "audit_logger": audit_logger,
         "claude_integration": claude_integration,
         "client_manager": client_manager,

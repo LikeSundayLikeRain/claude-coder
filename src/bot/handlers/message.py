@@ -17,7 +17,6 @@ from ...claude.exceptions import (
 )
 from ...config.settings import Settings
 from ...security.audit import AuditLogger
-from ...security.rate_limiter import RateLimiter
 from ...security.validators import SecurityValidator
 from ..utils.html_format import escape_html
 
@@ -297,7 +296,6 @@ async def handle_text_message(
     settings: Settings = context.bot_data["settings"]
 
     # Get services
-    rate_limiter: Optional[RateLimiter] = context.bot_data.get("rate_limiter")
     audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
 
     logger.info(
@@ -305,17 +303,6 @@ async def handle_text_message(
     )
 
     try:
-        # Check rate limit with estimated cost for text processing
-        estimated_cost = _estimate_text_processing_cost(message_text)
-
-        if rate_limiter:
-            allowed, limit_message = await rate_limiter.check_rate_limit(
-                user_id, estimated_cost
-            )
-            if not allowed:
-                await update.message.reply_text(f"⏱️ {limit_message}")
-                return
-
         # Send typing indicator
         await update.message.chat.send_action("typing")
 
@@ -539,7 +526,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "security_validator"
     )
     audit_logger: Optional[AuditLogger] = context.bot_data.get("audit_logger")
-    rate_limiter: Optional[RateLimiter] = context.bot_data.get("rate_limiter")
 
     logger.info(
         "Processing document upload",
@@ -578,16 +564,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 parse_mode="HTML",
             )
             return
-
-        # Check rate limit for file processing
-        file_cost = _estimate_file_processing_cost(document.file_size)
-        if rate_limiter:
-            allowed, limit_message = await rate_limiter.check_rate_limit(
-                user_id, file_cost
-            )
-            if not allowed:
-                await update.message.reply_text(f"⏱️ {limit_message}")
-                return
 
         # Send processing indicator
         await update.message.chat.send_action("upload_document")

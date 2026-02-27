@@ -55,7 +55,6 @@ def orchestrator(tmp_dir):
         "claude_integration": MagicMock(),
         "storage": MagicMock(),
         "security_validator": MagicMock(),
-        "rate_limiter": MagicMock(),
         "audit_logger": MagicMock(),
     }
     return MessageOrchestrator(settings, deps)

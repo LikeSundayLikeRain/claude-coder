@@ -866,21 +866,6 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
     relative_path = current_dir.relative_to(settings.approved_directory)
 
-    # Get rate limiter info if available
-    rate_limiter = context.bot_data.get("rate_limiter")
-    usage_info = ""
-    if rate_limiter:
-        try:
-            user_status = rate_limiter.get_user_status(user_id)
-            cost_usage = user_status.get("cost_usage", {})
-            current_cost = cost_usage.get("current", 0.0)
-            cost_limit = cost_usage.get("limit", settings.claude_max_cost_per_user)
-            cost_percentage = (current_cost / cost_limit) * 100 if cost_limit > 0 else 0
-
-            usage_info = f"💰 Usage: ${current_cost:.2f} / ${cost_limit:.2f} ({cost_percentage:.0f}%)\n"
-        except Exception:
-            usage_info = "💰 Usage: <i>Unable to retrieve</i>\n"
-
     # Check if there's a resumable session from the database
     resumable_info = ""
     if not claude_session_id:
@@ -900,7 +885,6 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "",
         f"📂 Directory: <code>{relative_path}/</code>",
         f"🤖 Claude Session: {'✅ Active' if claude_session_id else '❌ None'}",
-        usage_info.rstrip(),
         f"🕐 Last Update: {update.message.date.strftime('%H:%M:%S UTC')}",
     ]
 

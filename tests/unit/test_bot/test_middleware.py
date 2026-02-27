@@ -13,7 +13,6 @@ import pytest
 from telegram.ext import ApplicationHandlerStop
 
 from src.bot.core import ClaudeCodeBot
-from src.bot.middleware.rate_limit import estimate_message_cost
 from src.config import create_test_config
 from src.config.settings import Settings
 
@@ -44,7 +43,6 @@ def bot(mock_settings):
     deps = {
         "auth_manager": MagicMock(),
         "security_validator": MagicMock(),
-        "rate_limiter": MagicMock(),
         "audit_logger": MagicMock(),
         "storage": MagicMock(),
         "claude_integration": MagicMock(),
@@ -107,20 +105,6 @@ class TestMiddlewareBlocksSubsequentGroups:
         with pytest.raises(ApplicationHandlerStop):
             await wrapper(mock_update, mock_context)
 
-    async def test_rate_limit_rejection_raises_handler_stop(
-        self, bot, mock_update, mock_context
-    ):
-        """Rate limit middleware must raise ApplicationHandlerStop."""
-
-        async def rejecting_rate_limit(handler, event, data):
-            await event.effective_message.reply_text("Rate limited")
-            return
-
-        wrapper = bot._create_middleware_handler(rejecting_rate_limit)
-
-        with pytest.raises(ApplicationHandlerStop):
-            await wrapper(mock_update, mock_context)
-
     async def test_allowed_request_does_not_raise(self, bot, mock_update, mock_context):
         """Middleware that calls the handler must NOT raise ApplicationHandlerStop."""
 
@@ -169,26 +153,6 @@ class TestMiddlewareBlocksSubsequentGroups:
         wrapper = bot._create_middleware_handler(auth_middleware)
         await wrapper(mock_update, mock_context)
 
-    async def test_real_rate_limit_middleware_rejection(
-        self, bot, mock_update, mock_context
-    ):
-        """Integration test: rate_limit_middleware rejects when limit exceeded."""
-        from src.bot.middleware.rate_limit import rate_limit_middleware
-
-        rate_limiter = MagicMock()
-        rate_limiter.check_rate_limit = AsyncMock(
-            return_value=(False, "Rate limit exceeded. Try again in 30s.")
-        )
-        bot.deps["rate_limiter"] = rate_limiter
-
-        audit_logger = AsyncMock()
-        bot.deps["audit_logger"] = audit_logger
-
-        wrapper = bot._create_middleware_handler(rate_limit_middleware)
-
-        with pytest.raises(ApplicationHandlerStop):
-            await wrapper(mock_update, mock_context)
-
     async def test_dependencies_injected_before_middleware_runs(
         self, bot, mock_update, mock_context
     ):
@@ -204,7 +168,6 @@ class TestMiddlewareBlocksSubsequentGroups:
 
         assert "auth_manager" in captured_data
         assert "security_validator" in captured_data
-        assert "rate_limiter" in captured_data
         assert "settings" in captured_data
 
 
@@ -259,11 +222,3 @@ async def test_middleware_wrapper_runs_for_non_bot_updates() -> None:
     assert middleware_called is True
 
 
-def test_estimate_message_cost_handles_none_text() -> None:
-    """Cost estimation should not fail on service-like messages without text."""
-    event = MagicMock()
-    event.effective_message = MagicMock(text=None, document=None, photo=None)
-
-    cost = estimate_message_cost(event)
-
-    assert cost >= 0.01

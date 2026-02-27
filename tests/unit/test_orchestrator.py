@@ -77,7 +77,6 @@ def deps():
         "claude_integration": MagicMock(),
         "storage": MagicMock(),
         "security_validator": MagicMock(),
-        "rate_limiter": MagicMock(),
         "audit_logger": MagicMock(),
     }
 
@@ -246,7 +245,7 @@ async def test_agentic_status_compact(agentic_settings, deps):
 
     context = MagicMock()
     context.user_data = {}
-    context.bot_data = {"rate_limiter": None}
+    context.bot_data = {}
 
     await orchestrator.agentic_status(update, context)
 
@@ -288,7 +287,6 @@ async def test_agentic_text_calls_claude(agentic_settings, deps):
         "settings": agentic_settings,
         "claude_integration": claude_integration,
         "storage": None,
-        "rate_limiter": None,
         "audit_logger": None,
     }
 
@@ -402,7 +400,6 @@ async def test_agentic_text_logs_failure_on_error(agentic_settings, deps):
         "settings": agentic_settings,
         "claude_integration": claude_integration,
         "storage": None,
-        "rate_limiter": None,
         "audit_logger": audit_logger,
     }
 
