@@ -8,6 +8,7 @@ from src.claude.history import (
     append_history_entry,
     check_history_format_health,
     filter_by_directory,
+    find_session_by_id,
     read_claude_history,
     read_session_transcript,
 )
@@ -205,6 +206,31 @@ class TestFilterByDirectory:
 
         result = filter_by_directory(entries, target_dir)
         assert result == []
+
+
+class TestFindSessionById:
+    """Tests for finding a session entry by ID."""
+
+    def test_finds_existing_session(self) -> None:
+        entries = [
+            HistoryEntry(session_id="aaa", display="first", timestamp=1000, project="/proj/a"),
+            HistoryEntry(session_id="bbb", display="second", timestamp=2000, project="/proj/b"),
+        ]
+        result = find_session_by_id(entries, "bbb")
+        assert result is not None
+        assert result.session_id == "bbb"
+        assert result.project == "/proj/b"
+
+    def test_returns_none_for_missing(self) -> None:
+        entries = [
+            HistoryEntry(session_id="aaa", display="first", timestamp=1000, project="/proj/a"),
+        ]
+        result = find_session_by_id(entries, "zzz")
+        assert result is None
+
+    def test_returns_none_for_empty_list(self) -> None:
+        result = find_session_by_id([], "aaa")
+        assert result is None
 
 
 class TestCheckHistoryFormatHealth:
