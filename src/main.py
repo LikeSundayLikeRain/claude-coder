@@ -37,38 +37,66 @@ from src.storage.facade import Storage
 
 
 def setup_logging(debug: bool = False) -> None:
-    """Configure structured logging."""
+    """Configure structured logging.
+
+    Routes ALL log output (structlog and stdlib) through the same
+    processor chain so every line is consistently formatted:
+    JSON in production, coloured console in debug.
+    """
     level = logging.DEBUG if debug else logging.INFO
 
-    # Configure standard logging
-    logging.basicConfig(
-        level=level,
-        format="%(message)s",
-        stream=sys.stdout,
+    # Shared processors applied to every log record (structlog + stdlib)
+    shared_processors: list[Any] = [
+        structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+    ]
+
+    renderer: Any = (
+        structlog.dev.ConsoleRenderer()
+        if debug
+        else structlog.processors.JSONRenderer()
     )
 
-    # Configure structlog
+    # Configure structlog — the final renderer is handled by the
+    # stdlib ProcessorFormatter so structlog just prepares the event_dict.
     structlog.configure(
         processors=[
-            structlog.stdlib.filter_by_level,
-            structlog.stdlib.add_logger_name,
-            structlog.stdlib.add_log_level,
-            structlog.stdlib.PositionalArgumentsFormatter(),
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-            structlog.processors.UnicodeDecoder(),
-            (
-                structlog.processors.JSONRenderer()
-                if not debug
-                else structlog.dev.ConsoleRenderer()
-            ),
+            *shared_processors,
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),
         wrapper_class=structlog.stdlib.BoundLogger,
         cache_logger_on_first_use=True,
     )
+
+    # Single handler using ProcessorFormatter — stdlib loggers (httpx,
+    # apscheduler, telegram, etc.) now produce the same format as structlog.
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        structlog.stdlib.ProcessorFormatter(
+            processors=[
+                structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                renderer,
+            ],
+            foreign_pre_chain=shared_processors,
+        )
+    )
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(level)
+
+    # Quieten noisy third-party loggers
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def parse_args() -> argparse.Namespace:
