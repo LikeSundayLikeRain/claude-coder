@@ -132,14 +132,33 @@ class SecurityValidator:
     ]
 
     def __init__(
-        self, approved_directory: Path, disable_security_patterns: bool = False
+        self,
+        approved_directory: Optional[Path] = None,
+        disable_security_patterns: bool = False,
+        approved_directories: Optional[List[Path]] = None,
     ):
-        """Initialize validator with approved directory."""
-        self.approved_directory = approved_directory.resolve()
+        """Initialize validator with approved directory or directories.
+
+        Args:
+            approved_directory: Single approved directory (for backward compatibility)
+            disable_security_patterns: Whether to disable dangerous pattern checks
+            approved_directories: List of approved directories (takes precedence if provided)
+        """
+        # Handle approved_directories vs approved_directory
+        if approved_directories is not None:
+            self.approved_directories = [d.resolve() for d in approved_directories]
+        elif approved_directory is not None:
+            self.approved_directories = [approved_directory.resolve()]
+        else:
+            raise ValueError("Either approved_directory or approved_directories must be provided")
+
+        # Keep approved_directory for backward compatibility (points to first directory)
+        self.approved_directory = self.approved_directories[0]
         self.disable_security_patterns = disable_security_patterns
+
         logger.info(
             "Security validator initialized",
-            approved_directory=str(self.approved_directory),
+            approved_directories=[str(d) for d in self.approved_directories],
             disable_security_patterns=self.disable_security_patterns,
         )
 
@@ -186,15 +205,19 @@ class SecurityValidator:
             # Resolve path and check boundaries
             target = target.resolve()
 
-            # Ensure target is within approved directory
-            if not self._is_within_directory(target, self.approved_directory):
+            # Ensure target is within at least one approved directory
+            within_any = any(
+                self._is_within_directory(target, root)
+                for root in self.approved_directories
+            )
+            if not within_any:
                 logger.warning(
                     "Path traversal attempt detected",
                     requested_path=user_path,
                     resolved_path=str(target),
-                    approved_directory=str(self.approved_directory),
+                    approved_directories=[str(d) for d in self.approved_directories],
                 )
-                return False, None, "Access denied: path outside approved directory"
+                return False, None, "Access denied: path outside all approved directories"
 
             logger.debug(
                 "Path validation successful",
@@ -380,6 +403,7 @@ class SecurityValidator:
         """Get summary of security validation rules."""
         return {
             "approved_directory": str(self.approved_directory),
+            "approved_directories": [str(d) for d in self.approved_directories],
             "allowed_extensions": sorted(list(self.ALLOWED_EXTENSIONS)),
             "forbidden_filenames": sorted(list(self.FORBIDDEN_FILENAMES)),
             "dangerous_patterns_count": len(self.DANGEROUS_PATTERNS),

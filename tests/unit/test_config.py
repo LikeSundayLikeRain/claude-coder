@@ -592,3 +592,78 @@ def test_configuration_error_handling():
                 "APPROVED_DIRECTORY",
             ]:
                 os.environ.pop(key, None)
+
+
+class TestApprovedDirectories:
+    """Test multi-root approved directories configuration."""
+
+    def test_single_approved_directory_backward_compat(self, tmp_path):
+        """Test backward compatibility: APPROVED_DIRECTORY still works."""
+        test_dir = tmp_path / "projects"
+        test_dir.mkdir()
+
+        settings = Settings(
+            telegram_bot_token="test_token",
+            telegram_bot_username="test_bot",
+            approved_directory=str(test_dir),
+        )
+
+        # Should have approved_directories property that returns list with single dir
+        assert settings.approved_directories == [test_dir]
+        assert settings.approved_directory == test_dir
+
+    def test_multiple_approved_directories(self, tmp_path):
+        """Test comma-separated APPROVED_DIRECTORIES works."""
+        dir1 = tmp_path / "project1"
+        dir2 = tmp_path / "project2"
+        dir3 = tmp_path / "project3"
+        dir1.mkdir()
+        dir2.mkdir()
+        dir3.mkdir()
+
+        # Use APPROVED_DIRECTORIES alias (Pydantic prefers aliases in kwargs)
+        settings = Settings(
+            telegram_bot_token="test_token",
+            telegram_bot_username="test_bot",
+            approved_directory=str(dir1),  # Keep for backward compat
+            APPROVED_DIRECTORIES=f"{dir1},{dir2},{dir3}",
+        )
+
+        # Should parse all three directories
+        assert len(settings.approved_directories) == 3
+        assert dir1 in settings.approved_directories
+        assert dir2 in settings.approved_directories
+        assert dir3 in settings.approved_directories
+
+    def test_approved_directories_rejects_nonexistent(self, tmp_path):
+        """Test validation rejects non-existent directories."""
+        dir1 = tmp_path / "exists"
+        dir1.mkdir()
+        nonexistent = tmp_path / "nonexistent"
+
+        with pytest.raises(ValidationError) as exc_info:
+            Settings(
+                telegram_bot_token="test_token",
+                telegram_bot_username="test_bot",
+                approved_directory=str(dir1),
+                APPROVED_DIRECTORIES=f"{dir1},{nonexistent}",
+            )
+
+        assert "does not exist" in str(exc_info.value)
+
+    def test_approved_directories_rejects_overlapping(self, tmp_path):
+        """Test validation rejects overlapping paths."""
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        child = parent / "child"
+        child.mkdir()
+
+        with pytest.raises(ValidationError) as exc_info:
+            Settings(
+                telegram_bot_token="test_token",
+                telegram_bot_username="test_bot",
+                approved_directory=str(parent),
+                APPROVED_DIRECTORIES=f"{parent},{child}",
+            )
+
+        assert "overlap" in str(exc_info.value).lower()

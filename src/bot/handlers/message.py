@@ -382,19 +382,6 @@ async def handle_text_message(
                 claude_response, context, settings, user_id
             )
 
-            # Log interaction to storage
-            if storage:
-                try:
-                    await storage.save_claude_interaction(
-                        user_id=user_id,
-                        session_id=claude_response.session_id,
-                        prompt=message_text,
-                        response=claude_response,
-                        ip_address=None,  # Telegram doesn't provide IP
-                    )
-                except Exception as e:
-                    logger.warning("Failed to log interaction to storage", error=str(e))
-
             # Format response
             from ..utils.formatting import ResponseFormatter
 

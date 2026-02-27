@@ -349,3 +349,93 @@ class TestSecurityValidator:
         assert "  " not in sanitized  # No double spaces
         assert not sanitized.startswith(" ")  # No leading space
         assert not sanitized.endswith(" ")  # No trailing space
+
+
+class TestMultiRootValidation:
+    """Test multi-root directory validation functionality."""
+
+    @pytest.fixture
+    def temp_roots(self):
+        """Create multiple temporary approved directories for testing."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root1 = Path(temp_dir) / "root1"
+            root2 = Path(temp_dir) / "root2"
+            root3 = Path(temp_dir) / "root3"
+            root1.mkdir()
+            root2.mkdir()
+            root3.mkdir()
+            yield [root1, root2, root3]
+
+    def test_validate_path_within_any_root(self, temp_roots):
+        """Path should be valid if within any approved directory."""
+        validator = SecurityValidator(
+            approved_directory=temp_roots[0],
+            disable_security_patterns=False,
+        )
+        # Manually set approved_directories for testing
+        validator.approved_directories = temp_roots
+
+        # Create subdirectories in each root
+        (temp_roots[0] / "project1").mkdir()
+        (temp_roots[1] / "project2").mkdir()
+        (temp_roots[2] / "project3").mkdir()
+
+        # Test path in first root
+        valid, path, error = validator.validate_path(str(temp_roots[0] / "project1"))
+        assert valid is True
+        assert path == (temp_roots[0] / "project1").resolve()
+        assert error is None
+
+        # Test path in second root
+        valid, path, error = validator.validate_path(str(temp_roots[1] / "project2"))
+        assert valid is True
+        assert path == (temp_roots[1] / "project2").resolve()
+        assert error is None
+
+        # Test path in third root
+        valid, path, error = validator.validate_path(str(temp_roots[2] / "project3"))
+        assert valid is True
+        assert path == (temp_roots[2] / "project3").resolve()
+        assert error is None
+
+    def test_validate_path_outside_all_roots(self, temp_roots):
+        """Path should be rejected if outside all approved directories."""
+        validator = SecurityValidator(
+            approved_directory=temp_roots[0],
+            disable_security_patterns=False,
+        )
+        # Manually set approved_directories for testing
+        validator.approved_directories = temp_roots
+
+        # Try to access a path outside all roots
+        outside_path = temp_roots[0].parent / "outside"
+        outside_path.mkdir(exist_ok=True)
+
+        valid, path, error = validator.validate_path(str(outside_path))
+        assert valid is False
+        assert path is None
+        assert "outside all approved directories" in error.lower()
+
+    def test_backward_compat_single_directory(self):
+        """Single approved_directory positional arg should still work."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            approved_dir = Path(temp_dir) / "approved"
+            approved_dir.mkdir()
+
+            # Old-style initialization with single directory
+            validator = SecurityValidator(approved_dir)
+
+            # Should work with the single directory
+            (approved_dir / "test").mkdir()
+            valid, path, error = validator.validate_path(str(approved_dir / "test"))
+            assert valid is True
+            assert path == (approved_dir / "test").resolve()
+            assert error is None
+
+            # Should have approved_directories list internally
+            assert hasattr(validator, "approved_directories")
+            assert len(validator.approved_directories) == 1
+            assert validator.approved_directories[0] == approved_dir.resolve()
+
+            # Should maintain backward-compat approved_directory attribute
+            assert validator.approved_directory == approved_dir.resolve()

@@ -605,10 +605,11 @@ class TestCanUseToolCallback:
         return tmp_path / "project"
 
     @pytest.fixture
-    def security_validator(self):
+    def security_validator(self, approved_dir):
         """Create a mock SecurityValidator."""
         validator = MagicMock()
         validator.validate_path = MagicMock(return_value=(True, Path("/ok"), None))
+        validator.approved_directories = [approved_dir]
         return validator
 
     @pytest.fixture

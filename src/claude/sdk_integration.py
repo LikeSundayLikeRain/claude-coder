@@ -23,11 +23,8 @@ from claude_agent_sdk import (
     CLIJSONDecodeError,
     CLINotFoundError,
     Message,
-    PermissionResultAllow,
-    PermissionResultDeny,
     ProcessError,
     ResultMessage,
-    ToolPermissionContext,
     ToolUseBlock,
     UserMessage,
 )
@@ -42,7 +39,8 @@ from .exceptions import (
     ClaudeProcessError,
     ClaudeTimeoutError,
 )
-from .monitor import _is_claude_internal_path, check_bash_directory_boundary
+from .monitor import _make_can_use_tool_callback
+
 
 logger = structlog.get_logger()
 
@@ -132,67 +130,6 @@ class StreamUpdate:
     metadata: Optional[Dict] = None
 
 
-def _make_can_use_tool_callback(
-    security_validator: SecurityValidator,
-    working_directory: Path,
-    approved_directory: Path,
-) -> Any:
-    """Create a can_use_tool callback for SDK-level tool permission validation.
-
-    The callback validates file path boundaries and bash directory boundaries
-    *before* the SDK executes the tool, providing preventive security enforcement.
-    """
-    _FILE_TOOLS = {"Write", "Edit", "Read", "create_file", "edit_file", "read_file"}
-    _BASH_TOOLS = {"Bash", "bash", "shell"}
-
-    async def can_use_tool(
-        tool_name: str,
-        tool_input: Dict[str, Any],
-        context: ToolPermissionContext,
-    ) -> Any:
-        # File path validation
-        if tool_name in _FILE_TOOLS:
-            file_path = tool_input.get("file_path") or tool_input.get("path")
-            if file_path:
-                # Allow Claude Code internal paths (~/.claude/plans/, etc.)
-                if _is_claude_internal_path(file_path):
-                    return PermissionResultAllow()
-
-                valid, _resolved, error = security_validator.validate_path(
-                    file_path, working_directory
-                )
-                if not valid:
-                    logger.warning(
-                        "can_use_tool denied file operation",
-                        tool_name=tool_name,
-                        file_path=file_path,
-                        error=error,
-                    )
-                    return PermissionResultDeny(message=error or "Invalid file path")
-
-        # Bash directory boundary validation
-        if tool_name in _BASH_TOOLS:
-            command = tool_input.get("command", "")
-            if command:
-                valid, error = check_bash_directory_boundary(
-                    command, working_directory, approved_directory
-                )
-                if not valid:
-                    logger.warning(
-                        "can_use_tool denied bash command",
-                        tool_name=tool_name,
-                        command=command,
-                        error=error,
-                    )
-                    return PermissionResultDeny(
-                        message=error or "Bash directory boundary violation"
-                    )
-
-        return PermissionResultAllow()
-
-    return can_use_tool
-
-
 class ClaudeSDKManager:
     """Manage Claude Code SDK integration."""
 
@@ -249,7 +186,7 @@ class ClaudeSDKManager:
             # Build Claude Agent options
             cli_path = find_claude_cli(self.config.claude_cli_path)
             options = ClaudeAgentOptions(
-                max_turns=self.config.claude_max_turns,
+                max_turns=self.config.claude_max_turns or None,  # 0/None = unlimited
                 cwd=str(working_directory),
                 allowed_tools=self.config.claude_allowed_tools,
                 disallowed_tools=self.config.claude_disallowed_tools,

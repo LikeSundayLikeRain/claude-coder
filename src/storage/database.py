@@ -8,11 +8,18 @@ Features:
 """
 
 import asyncio
-import sqlite3
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator, List, Tuple
+
+# Use pysqlite3 for modern SQLite features (3.45+)
+# Must be patched before aiosqlite imports sqlite3
+import pysqlite3
+
+sys.modules["sqlite3"] = pysqlite3
+import sqlite3  # noqa: E402 — now points to pysqlite3
 
 import aiosqlite
 import structlog
@@ -308,6 +315,68 @@ class DatabaseManager:
                     ON project_threads(chat_id, is_active);
                 CREATE INDEX IF NOT EXISTS idx_project_threads_slug
                     ON project_threads(project_slug);
+                """,
+            ),
+            (
+                5,
+                """
+                -- Add current_directory column for user working directory persistence
+                ALTER TABLE users ADD COLUMN current_directory TEXT;
+                CREATE INDEX IF NOT EXISTS idx_users_current_directory
+                    ON users(user_id, current_directory);
+                """,
+            ),
+            (
+                6,
+                """
+                -- Bot session registry for tracking CLI and bot sessions
+                CREATE TABLE IF NOT EXISTS bot_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    directory TEXT NOT NULL,
+                    display_name TEXT DEFAULT '',
+                    first_seen_at TIMESTAMP NOT NULL,
+                    last_used_at TIMESTAMP NOT NULL,
+                    source TEXT DEFAULT 'bot'
+                );
+                CREATE INDEX IF NOT EXISTS idx_bot_sessions_user_dir ON bot_sessions(user_id, directory);
+                """,
+            ),
+            (
+                7,
+                """
+                -- Drop redundant tables (data now lives in Claude's own storage)
+                DROP TABLE IF EXISTS bot_sessions;
+                DROP TABLE IF EXISTS tool_usage;
+                DROP TABLE IF EXISTS messages;
+                DROP TABLE IF EXISTS cost_tracking;
+                DROP TABLE IF EXISTS user_tokens;
+
+                -- Drop analytics views that referenced removed tables
+                DROP VIEW IF EXISTS daily_stats;
+                DROP VIEW IF EXISTS user_stats;
+                """,
+            ),
+            (
+                8,
+                """
+                -- Session state now lives in Claude CLI's history.jsonl
+                DROP TABLE IF EXISTS sessions;
+                """,
+            ),
+            (
+                9,
+                """
+                CREATE TABLE IF NOT EXISTS bot_sessions (
+                    user_id     INTEGER PRIMARY KEY,
+                    session_id  TEXT NOT NULL,
+                    directory   TEXT NOT NULL,
+                    model       TEXT,
+                    betas       TEXT,
+                    last_active TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_bot_sessions_last_active
+                    ON bot_sessions(last_active);
                 """,
             ),
         ]

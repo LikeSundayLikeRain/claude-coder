@@ -4,8 +4,9 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
+from typing import List, Optional
 
-from src.storage.facade import Storage
+from src.claude.history import read_session_transcript
 from src.utils.constants import MAX_SESSION_LENGTH
 
 
@@ -32,13 +33,12 @@ class ExportedSession:
 class SessionExporter:
     """Handles exporting chat sessions in various formats."""
 
-    def __init__(self, storage: Storage):
-        """Initialize exporter with storage dependency.
+    def __init__(self, **kwargs):
+        """Initialize exporter.
 
-        Args:
-            storage: Storage facade for session data access
+        Accepts arbitrary kwargs for backward compatibility (previously
+        took a storage parameter that is no longer needed).
         """
-        self.storage = storage
 
     async def export_session(
         self,
@@ -47,6 +47,8 @@ class SessionExporter:
         format: ExportFormat = ExportFormat.MARKDOWN,
     ) -> ExportedSession:
         """Export a session in the specified format.
+
+        Reads from Claude transcript files directly.
 
         Args:
             user_id: User ID
@@ -59,27 +61,32 @@ class SessionExporter:
         Raises:
             ValueError: If session not found or invalid format
         """
-        # Get session data
-        session = await self.storage.get_session(user_id, session_id)
-        if not session:
+        # Read messages from Claude transcript files
+        messages = read_session_transcript(session_id)
+        if not messages:
             raise ValueError(f"Session {session_id} not found")
 
-        # Get session messages
-        messages = await self.storage.get_session_messages(
-            session_id, limit=MAX_SESSION_LENGTH
-        )
+        # Cap at MAX_SESSION_LENGTH
+        messages = messages[:MAX_SESSION_LENGTH]
+
+        # Build session metadata
+        session = {
+            "id": session_id,
+            "created_at": messages[0].get("timestamp", ""),
+            "updated_at": messages[-1].get("timestamp", "") if messages else "",
+        }
 
         # Export based on format
         if format == ExportFormat.MARKDOWN:
-            content = await self._export_markdown(session, messages)
+            content = self._export_markdown(session, messages)
             mime_type = "text/markdown"
             extension = "md"
         elif format == ExportFormat.JSON:
-            content = await self._export_json(session, messages)
+            content = self._export_json(session, messages)
             mime_type = "application/json"
             extension = "json"
         elif format == ExportFormat.HTML:
-            content = await self._export_html(session, messages)
+            content = self._export_html(session, messages)
             mime_type = "text/html"
             extension = "html"
         else:
@@ -98,16 +105,8 @@ class SessionExporter:
             created_at=datetime.now(UTC),
         )
 
-    async def _export_markdown(self, session: dict, messages: list) -> str:
-        """Export session as Markdown.
-
-        Args:
-            session: Session metadata
-            messages: List of messages
-
-        Returns:
-            Markdown formatted content
-        """
+    def _export_markdown(self, session: dict, messages: list) -> str:
+        """Export session as Markdown."""
         lines = []
 
         # Header
@@ -121,9 +120,9 @@ class SessionExporter:
 
         # Messages
         for msg in messages:
-            timestamp = msg["created_at"]
-            role = "You" if msg["role"] == "user" else "Claude"
-            content = msg["content"]
+            timestamp = msg.get("timestamp", "")
+            role = "You" if msg.get("role") == "human" else "Claude"
+            content = msg.get("content", "")
 
             lines.append(f"### {role} - {timestamp}")
             lines.append(f"\n{content}\n")
@@ -131,34 +130,20 @@ class SessionExporter:
 
         return "\n".join(lines)
 
-    async def _export_json(self, session: dict, messages: list) -> str:
-        """Export session as JSON.
-
-        Args:
-            session: Session metadata
-            messages: List of messages
-
-        Returns:
-            JSON formatted content
-        """
+    def _export_json(self, session: dict, messages: list) -> str:
+        """Export session as JSON."""
         export_data = {
             "session": {
                 "id": session["id"],
-                "user_id": session["user_id"],
-                "created_at": session["created_at"].isoformat(),
-                "updated_at": (
-                    session.get("updated_at", "").isoformat()
-                    if session.get("updated_at")
-                    else None
-                ),
+                "created_at": session.get("created_at", ""),
+                "updated_at": session.get("updated_at", ""),
                 "message_count": len(messages),
             },
             "messages": [
                 {
-                    "id": msg["id"],
-                    "role": msg["role"],
-                    "content": msg["content"],
-                    "created_at": msg["created_at"].isoformat(),
+                    "role": msg.get("role", ""),
+                    "content": msg.get("content", ""),
+                    "timestamp": msg.get("timestamp", ""),
                 }
                 for msg in messages
             ],
@@ -166,18 +151,10 @@ class SessionExporter:
 
         return json.dumps(export_data, indent=2, ensure_ascii=False)
 
-    async def _export_html(self, session: dict, messages: list) -> str:
-        """Export session as HTML.
-
-        Args:
-            session: Session metadata
-            messages: List of messages
-
-        Returns:
-            HTML formatted content
-        """
+    def _export_html(self, session: dict, messages: list) -> str:
+        """Export session as HTML."""
         # Convert markdown content to HTML-safe format
-        markdown_content = await self._export_markdown(session, messages)
+        markdown_content = self._export_markdown(session, messages)
         html_content = self._markdown_to_html(markdown_content)
 
         # HTML template
@@ -264,13 +241,9 @@ class SessionExporter:
         """Convert markdown to HTML.
 
         Simple conversion for basic markdown elements.
-
-        Args:
-            markdown: Markdown content
-
-        Returns:
-            HTML content
         """
+        import re
+
         html = markdown
 
         # Headers
@@ -278,8 +251,6 @@ class SessionExporter:
         html = html.replace("### ", "<h3>").replace("\n", "</h3>\n", 3)
 
         # Bold
-        import re
-
         html = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", html)
 
         # Code blocks

@@ -9,7 +9,6 @@ from typing import Any, Callable, Dict, List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from src.storage.models import SessionModel
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +121,7 @@ class QuickActionManager:
         }
 
     async def get_suggestions(
-        self, session: SessionModel, limit: int = 6
+        self, session: Any, limit: int = 6
     ) -> List[QuickAction]:
         """Get quick action suggestions based on session context.
 
@@ -151,7 +150,7 @@ class QuickActionManager:
             self.logger.error(f"Error getting suggestions: {e}")
             return []
 
-    async def _analyze_context(self, session: SessionModel) -> Dict[str, Any]:
+    async def _analyze_context(self, session: Any) -> Dict[str, Any]:
         """Analyze session context to determine available actions.
 
         Args:
@@ -247,7 +246,7 @@ class QuickActionManager:
         return InlineKeyboardMarkup(keyboard)
 
     async def execute_action(
-        self, action_id: str, session: SessionModel, callback: Optional[Callable] = None
+        self, action_id: str, session: Any, callback: Optional[Callable] = None
     ) -> str:
         """Execute a quick action.
 

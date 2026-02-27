@@ -20,7 +20,6 @@ from src.utils.constants import (
     DEFAULT_CLAUDE_MAX_TURNS,
     DEFAULT_CLAUDE_TIMEOUT_SECONDS,
     DEFAULT_DATABASE_URL,
-    DEFAULT_MAX_SESSIONS_PER_USER,
     DEFAULT_PROJECT_THREADS_SYNC_ACTION_INTERVAL_SECONDS,
     DEFAULT_RATE_LIMIT_BURST,
     DEFAULT_RATE_LIMIT_REQUESTS,
@@ -40,6 +39,11 @@ class Settings(BaseSettings):
 
     # Security
     approved_directory: Path = Field(..., description="Base directory for projects")
+    approved_directories_str: str = Field(
+        "",
+        alias="APPROVED_DIRECTORIES",
+        description="Comma-separated list of approved directories (overrides single approved_directory)",
+    )
     allowed_users: Optional[List[int]] = Field(
         None, description="Allowed Telegram user IDs"
     )
@@ -145,15 +149,9 @@ class Settings(BaseSettings):
         DEFAULT_SESSION_TIMEOUT_HOURS, description="Session timeout"
     )
     session_timeout_minutes: int = Field(
-        default=120,
-        description="Session timeout in minutes",
-        ge=10,
-        le=1440,  # Max 24 hours
+        default=0,
+        description="Session timeout in minutes (0 = never expire)",
     )
-    max_sessions_per_user: int = Field(
-        DEFAULT_MAX_SESSIONS_PER_USER, description="Max concurrent sessions"
-    )
-
     # Features
     enable_mcp: bool = Field(False, description="Enable Model Context Protocol")
     mcp_config_path: Optional[Path] = Field(
@@ -272,6 +270,56 @@ class Settings(BaseSettings):
             raise ValueError(f"Approved directory is not a directory: {path}")
         return path  # type: ignore[no-any-return]
 
+    @model_validator(mode="after")
+    def validate_approved_directories(self) -> "Settings":
+        """Validate all approved directories exist and don't overlap."""
+        # Get all directories from approved_directories property
+        try:
+            dirs = self.approved_directories
+        except Exception:
+            # If property fails, just return (other validators will catch it)
+            return self
+
+        # Check all paths exist and are directories
+        for dir_path in dirs:
+            if not dir_path.exists():
+                raise ValueError(f"Approved directory does not exist: {dir_path}")
+            if not dir_path.is_dir():
+                raise ValueError(f"Approved directory is not a directory: {dir_path}")
+            if not dir_path.is_absolute():
+                raise ValueError(f"Approved directory must be absolute: {dir_path}")
+
+        # Check for overlapping paths
+        for i, dir1 in enumerate(dirs):
+            for dir2 in dirs[i + 1 :]:
+                try:
+                    # Check if dir2 is relative to dir1 (dir2 is inside dir1)
+                    dir2.relative_to(dir1)
+                    raise ValueError(
+                        f"Approved directories overlap: {dir2} is inside {dir1}"
+                    )
+                except ValueError as e:
+                    # relative_to raises ValueError if not relative
+                    if "overlap" in str(e):
+                        raise
+                    # Not relative, check the other direction
+                    pass
+
+                try:
+                    # Check if dir1 is relative to dir2 (dir1 is inside dir2)
+                    dir1.relative_to(dir2)
+                    raise ValueError(
+                        f"Approved directories overlap: {dir1} is inside {dir2}"
+                    )
+                except ValueError as e:
+                    # relative_to raises ValueError if not relative
+                    if "overlap" in str(e):
+                        raise
+                    # Not relative, paths are independent
+                    pass
+
+        return self
+
     @field_validator("mcp_config_path", mode="before")
     @classmethod
     def validate_mcp_config(cls, v: Any, info: Any) -> Optional[Path]:
@@ -385,6 +433,26 @@ class Settings(BaseSettings):
                 )
 
         return self
+
+    @property
+    def approved_directories(self) -> List[Path]:
+        """Get list of all approved directories.
+
+        Returns directories from APPROVED_DIRECTORIES if set,
+        otherwise falls back to single approved_directory for backward compatibility.
+        """
+        if self.approved_directories_str and self.approved_directories_str.strip():
+            # Parse comma-separated paths
+            paths = []
+            for path_str in self.approved_directories_str.split(","):
+                path_str = path_str.strip()
+                if path_str:
+                    path = Path(path_str).resolve()
+                    paths.append(path)
+            return paths
+        else:
+            # Backward compatibility: return single directory as list
+            return [self.approved_directory]
 
     @property
     def is_production(self) -> bool:

@@ -22,9 +22,19 @@ from telegram.ext import (
     filters,
 )
 
+from ..claude.client_manager import ClientManager
+from ..claude.history import (
+    append_history_entry,
+    check_history_format_health,
+    filter_by_directory,
+    read_claude_history,
+    read_session_transcript,
+)
 from ..claude.sdk_integration import StreamUpdate
+from ..claude.stream_handler import StreamHandler
 from ..config.settings import Settings
 from ..projects import PrivateTopicsUnavailableError
+from ..skills.loader import discover_skills, load_skill_body, resolve_skill_prompt
 from .utils.html_format import escape_html
 
 logger = structlog.get_logger()
@@ -287,15 +297,30 @@ class MessageOrchestrator:
         handlers = [
             ("start", self.agentic_start),
             ("new", self.agentic_new),
+            ("stop", self.handle_stop),
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
+            ("compact", self.agentic_compact),
+            ("model", self.handle_model),
             ("repo", self.agentic_repo),
+            ("sessions", self.agentic_sessions),
+            ("commands", self.agentic_commands),
         ]
         if self.settings.enable_project_threads:
             handlers.append(("sync_threads", command.sync_threads))
 
         for cmd, handler in handlers:
             app.add_handler(CommandHandler(cmd, self._inject_deps(handler)))
+
+        # Unrecognized /commands -> skill lookup + Claude fallback.
+        # Registered AFTER CommandHandlers in group 0 so it only runs
+        # when no CommandHandler matched (within a group, first match wins).
+        app.add_handler(
+            MessageHandler(
+                filters.COMMAND,
+                self._inject_deps(self.agentic_text),
+            ),
+        )
 
         # Text messages -> Claude
         app.add_handler(
@@ -320,11 +345,11 @@ class MessageOrchestrator:
             group=10,
         )
 
-        # Only cd: callbacks (for project selection), scoped by pattern
+        # Callbacks for cd:, session:, skill:, and model: patterns
         app.add_handler(
             CallbackQueryHandler(
                 self._inject_deps(self._agentic_callback),
-                pattern=r"^cd:",
+                pattern=r"^(cd:|session:|skill:|model:)",
             )
         )
 
@@ -384,9 +409,14 @@ class MessageOrchestrator:
             commands = [
                 BotCommand("start", "Start the bot"),
                 BotCommand("new", "Start a fresh session"),
+                BotCommand("stop", "Interrupt running query"),
                 BotCommand("status", "Show session status"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
+                BotCommand("compact", "Compress context, keep continuity"),
+                BotCommand("model", "Switch Claude model"),
                 BotCommand("repo", "List repos / switch workspace"),
+                BotCommand("sessions", "Choose a session to resume"),
+                BotCommand("commands", "Browse available skills"),
             ]
             if self.settings.enable_project_threads:
                 commands.append(BotCommand("sync_threads", "Sync project topics"))
@@ -412,6 +442,76 @@ class MessageOrchestrator:
             return commands
 
     # --- Agentic handlers ---
+
+    async def handle_stop(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Interrupt the currently running Claude query."""
+        if not update.effective_user or not update.message:
+            return
+        user_id = update.effective_user.id
+        client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
+        if client_manager:
+            client = client_manager.get_active_client(user_id)
+            if client and client.is_querying:
+                await client_manager.interrupt(user_id)
+                await update.message.reply_text("Interrupting current query...")
+                return
+        await update.message.reply_text("No active query to interrupt.")
+
+    async def handle_model(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show model selection keyboard."""
+        if not update.message:
+            return
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Sonnet", callback_data="model:sonnet"),
+                    InlineKeyboardButton("Opus", callback_data="model:opus"),
+                    InlineKeyboardButton("Haiku", callback_data="model:haiku"),
+                ],
+                [
+                    InlineKeyboardButton("Sonnet 1M", callback_data="model:sonnet:1m"),
+                    InlineKeyboardButton("Opus 1M", callback_data="model:opus:1m"),
+                ],
+            ]
+        )
+        await update.message.reply_text("Select a model:", reply_markup=keyboard)
+
+    async def handle_model_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle model selection callback.
+
+        Note: query.answer() is already called by _agentic_callback.
+        """
+        query = update.callback_query
+        if not query or not query.data:
+            return
+        data = query.data  # e.g. "model:sonnet" or "model:opus:1m"
+        parts = data.split(":")
+        # parts[0] = "model", parts[1] = model name, parts[2] = optional "1m"
+        if len(parts) < 2:
+            return
+        model = parts[1]
+        is_1m = len(parts) > 2 and parts[2] == "1m"
+        betas = ["context-1m-2025-08-07"] if is_1m else None
+
+        # Build display label
+        label_map = {"sonnet": "Sonnet", "opus": "Opus", "haiku": "Haiku"}
+        label = label_map.get(model, model)
+        if is_1m:
+            label += " 1M"
+
+        user_id = query.from_user.id
+        client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
+        if client_manager:
+            await client_manager.set_model(user_id, model, betas)
+            await query.edit_message_text(f"Model set to: {label}")
+        else:
+            await query.edit_message_text("Model switching is not available.")
 
     async def agentic_start(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -461,8 +561,17 @@ class MessageOrchestrator:
         await update.message.reply_text(
             f"Hi {safe_name}! I'm your AI coding assistant.\n"
             f"Just tell me what you need — I can read, write, and run code.\n\n"
-            f"Working in: {dir_display}\n"
-            f"Commands: /new (reset) · /status"
+            f"Working in: {dir_display}\n\n"
+            f"<b>Commands:</b>\n"
+            f"/new — Start fresh session\n"
+            f"/stop — Interrupt running query\n"
+            f"/status — Current session info\n"
+            f"/model — Switch Claude model\n"
+            f"/sessions — Pick a session to resume\n"
+            f"/commands — Browse available skills\n"
+            f"/compact — Compress context\n"
+            f"/repo — Switch workspace\n"
+            f"/verbose — Set output level (0/1/2)"
             f"{sync_line}",
             parse_mode="HTML",
         )
@@ -471,23 +580,101 @@ class MessageOrchestrator:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Reset session, one-line confirmation."""
+        user_id = update.effective_user.id
         context.user_data["claude_session_id"] = None
         context.user_data["session_started"] = True
         context.user_data["force_new_session"] = True
+
+        # Disconnect persistent client so next message starts fresh
+        client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
+        if client_manager:
+            await client_manager.disconnect(user_id)
 
         await update.message.reply_text("Session reset. What's next?")
 
     async def agentic_status(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Compact one-line status, no buttons."""
+        """Show current session status with workspace and session info."""
         current_dir = context.user_data.get(
             "current_directory", self.settings.approved_directory
         )
-        dir_display = str(current_dir)
+        if not isinstance(current_dir, Path):
+            current_dir = Path(str(current_dir))
 
+        # Determine which workspace root contains current_dir
+        workspace_root = None
+        approved_dirs = self.settings.approved_directories
+        for root in approved_dirs:
+            try:
+                current_dir.relative_to(root)
+                workspace_root = root
+                break
+            except ValueError:
+                continue
+
+        # Build workspace display
+        if workspace_root and len(approved_dirs) > 1:
+            # Multi-root: show which root we're in
+            workspace_name = workspace_root.name
+            workspace_line = f"<b>Workspace:</b> {workspace_name}\n"
+        else:
+            workspace_line = ""
+
+        dir_display = escape_html(str(current_dir))
+
+        # Session info
         session_id = context.user_data.get("claude_session_id")
-        session_status = "active" if session_id else "none"
+        if session_id:
+            # Try to get display name from history.jsonl
+            display_name = ""
+            try:
+                history_entries = read_claude_history()
+                for entry in history_entries:
+                    if entry.session_id == session_id:
+                        display_name = entry.display
+                        break
+            except Exception:
+                pass
+
+            if display_name:
+                session_line = f"<b>Session:</b> {escape_html(display_name[:50])}\n"
+            else:
+                session_line = f"<b>Session:</b> {session_id[:12]}...\n"
+
+            # Count available sessions for this directory
+            try:
+                dir_entries = filter_by_directory(read_claude_history(), current_dir)
+                session_count = len(dir_entries)
+            except Exception:
+                session_count = 0
+
+            if session_count > 1:
+                session_line += f"({session_count} sessions available)\n"
+        else:
+            session_line = "<b>Session:</b> none (send a message to start)\n"
+
+        # ClientManager info (model, connection state)
+        client_line = ""
+        client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
+        if client_manager:
+            active_client = client_manager.get_active_client(update.effective_user.id)
+            if active_client:
+                model_name = active_client.model or "default"
+                if active_client.is_querying:
+                    state = "querying"
+                elif active_client.is_connected:
+                    state = "connected"
+                else:
+                    state = "disconnected"
+                client_line = (
+                    f"<b>Model:</b> {escape_html(model_name)}\n"
+                    f"<b>State:</b> {state}\n"
+                )
+                # Use active client's session_id if context doesn't have one
+                if not session_id and active_client.session_id:
+                    session_id = active_client.session_id
+                    session_line = f"<b>Session:</b> {session_id[:12]}...\n"
 
         # Cost info
         cost_str = ""
@@ -497,12 +684,17 @@ class MessageOrchestrator:
                 user_status = rate_limiter.get_user_status(update.effective_user.id)
                 cost_usage = user_status.get("cost_usage", {})
                 current_cost = cost_usage.get("current", 0.0)
-                cost_str = f" · Cost: ${current_cost:.2f}"
+                cost_str = f"<b>Cost:</b> ${current_cost:.2f}\n"
             except Exception:
                 pass
 
         await update.message.reply_text(
-            f"📂 {dir_display} · Session: {session_status}{cost_str}"
+            f"{workspace_line}"
+            f"<b>Directory:</b> <code>{dir_display}</code>\n"
+            f"{session_line}"
+            f"{client_line}"
+            f"{cost_str}",
+            parse_mode="HTML",
         )
 
     def _get_verbose_level(self, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -546,6 +738,109 @@ class MessageOrchestrator:
             f"Verbosity set to <b>{level}</b> ({labels[level]})",
             parse_mode="HTML",
         )
+
+    async def agentic_compact(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Compress conversation context while keeping session continuity."""
+        user_id = update.effective_user.id
+        session_id = context.user_data.get("claude_session_id")
+
+        # Check for active session
+        if not session_id:
+            await update.message.reply_text(
+                "No active session to compact. Start a conversation first."
+            )
+            return
+
+        logger.info(
+            "Compacting session context",
+            user_id=user_id,
+            session_id=session_id,
+        )
+
+        current_dir = context.user_data.get(
+            "current_directory", self.settings.approved_directories[0]
+        )
+
+        chat = update.message.chat
+        await chat.send_action("typing")
+        progress_msg = await update.message.reply_text("Compacting context...")
+
+        # Start typing heartbeat
+        heartbeat = self._start_typing_heartbeat(chat)
+
+        try:
+            # Step 1: Ask Claude to summarize the conversation
+            summary_prompt = (
+                "Summarize our conversation so far concisely. Include: "
+                "key decisions, current state of work, pending tasks, "
+                "and important context. Format as bullet points."
+            )
+
+            logger.info("Requesting conversation summary", user_id=user_id)
+
+            summary_response = await self._run_claude_query(
+                prompt=summary_prompt,
+                user_id=user_id,
+                current_dir=current_dir,
+                session_id=session_id,
+                force_new=False,
+                on_stream=None,
+                context=context,
+            )
+
+            summary_text = summary_response.content.strip()
+
+            # Step 2: Start new session seeded with the summary
+            reseed_prompt = (
+                f"This is a compacted session. Here is the context from our "
+                f"previous conversation:\n\n{summary_text}\n\n"
+                f"Please acknowledge briefly. We're continuing our work."
+            )
+
+            logger.info("Creating new session with summary", user_id=user_id)
+
+            new_response = await self._run_claude_query(
+                prompt=reseed_prompt,
+                user_id=user_id,
+                current_dir=current_dir,
+                session_id=None,
+                force_new=True,
+                on_stream=None,
+                context=context,
+            )
+
+            # Update session ID to the new one
+            context.user_data["claude_session_id"] = new_response.session_id
+
+            logger.info(
+                "Session compacted successfully",
+                user_id=user_id,
+                old_session_id=session_id,
+                new_session_id=new_response.session_id,
+            )
+
+            await progress_msg.delete()
+            await update.message.reply_text(
+                "Context compacted. Session continues with summary.",
+                reply_to_message_id=update.message.message_id,
+            )
+
+        except Exception as e:
+            logger.error(
+                "Failed to compact session",
+                error=str(e),
+                user_id=user_id,
+                session_id=session_id,
+            )
+            await progress_msg.delete()
+            await update.message.reply_text(
+                f"Failed to compact context: {str(e)[:200]}",
+                reply_to_message_id=update.message.message_id,
+            )
+        finally:
+            heartbeat.cancel()
 
     def _format_verbose_progress(
         self,
@@ -612,6 +907,112 @@ class MessageOrchestrator:
             if isinstance(v, str) and v:
                 return v[:60]
         return ""
+
+    async def _run_claude_query(
+        self,
+        prompt: str,
+        user_id: int,
+        current_dir: Any,
+        session_id: Optional[str],
+        force_new: bool,
+        on_stream: Optional[Callable[[StreamUpdate], Any]],
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> "ClaudeResponse":
+        """Run a query via ClientManager, streaming events through on_stream.
+
+        Returns a ClaudeResponse for compatibility with existing formatting code.
+        Falls back to ClaudeIntegration if ClientManager is not available.
+        """
+        from ..claude.sdk_integration import ClaudeResponse
+
+        client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
+        if client_manager is None:
+            # Safety fallback / classic-mode compatibility: in agentic mode
+            # client_manager is always set up in main.py, so this branch is
+            # only reachable if running in classic mode or during tests that
+            # don't provide a ClientManager.
+            claude_integration = context.bot_data.get("claude_integration")
+            if not claude_integration:
+                raise RuntimeError(
+                    "Neither client_manager nor claude_integration available"
+                )
+            return await claude_integration.run_command(
+                prompt=prompt,
+                working_directory=current_dir,
+                user_id=user_id,
+                session_id=session_id,
+                on_stream=on_stream,
+                force_new=force_new,
+            )
+
+        directory = str(current_dir)
+        approved_dir = str(self.settings.approved_directory)
+        stream_handler = StreamHandler()
+
+        start_ms = int(time.time() * 1000)
+
+        client = await client_manager.get_or_connect(
+            user_id=user_id,
+            directory=directory,
+            session_id=None if force_new else session_id,
+            approved_directory=approved_dir,
+            force_new=force_new,
+        )
+
+        response_text = ""
+        result_session_id: Optional[str] = None
+        cost = 0.0
+        num_turns = 0
+
+        async for message in client.query(prompt):
+            event = stream_handler.extract_content(message)
+            # Partial SDK StreamEvents are for UX progress only;
+            # complete AssistantMessages drive turn counting.
+            is_partial = message.__class__.__name__ == "StreamEvent"
+
+            if event.type == "result":
+                response_text = event.content or ""
+                result_session_id = event.session_id
+                cost = event.cost or 0.0
+                if result_session_id:
+                    await client_manager.update_session_id(user_id, result_session_id)
+            elif event.type == "text" and event.content:
+                if on_stream:
+                    await on_stream(
+                        StreamUpdate(type="assistant", content=event.content)
+                    )
+            elif event.type == "tool_use":
+                if not is_partial:
+                    num_turns += 1
+                if on_stream:
+                    await on_stream(
+                        StreamUpdate(
+                            type="assistant",
+                            tool_calls=[
+                                {
+                                    "name": event.tool_name or "",
+                                    "input": event.tool_input or {},
+                                }
+                            ],
+                        )
+                    )
+            elif event.type == "thinking" and event.content:
+                if on_stream:
+                    await on_stream(
+                        StreamUpdate(
+                            type="assistant", content=f"\U0001f4ad {event.content}"
+                        )
+                    )
+
+        duration_ms = int(time.time() * 1000) - start_ms
+
+        return ClaudeResponse(
+            content=response_text,
+            session_id=result_session_id or "",
+            cost=cost,
+            duration_ms=duration_ms,
+            num_turns=num_turns,
+        )
 
     @staticmethod
     def _start_typing_heartbeat(
@@ -699,6 +1100,115 @@ class MessageOrchestrator:
             message_length=len(message_text),
         )
 
+        # Check if this is a skill invocation (e.g., "/skillname args")
+        # Skip if it's a registered bot command
+        if message_text.startswith("/"):
+            parts = message_text[1:].split(None, 1)
+            if parts:
+                potential_skill_name = parts[0]
+                skill_args = parts[1] if len(parts) > 1 else ""
+
+                # List of registered bot commands to skip
+                registered_commands = {
+                    "start",
+                    "new",
+                    "stop",
+                    "status",
+                    "verbose",
+                    "compact",
+                    "model",
+                    "repo",
+                    "sessions",
+                    "commands",
+                    "sync_threads",
+                }
+
+                if potential_skill_name not in registered_commands:
+                    # Try to find this skill
+                    current_dir = context.user_data.get(
+                        "current_directory", self.settings.approved_directories[0]
+                    )
+                    skills = discover_skills(project_dir=Path(current_dir))
+                    # Match exact name, then unprefixed exact, then prefix match.
+                    # e.g., "brainstorm" matches "superpowers:brainstorming"
+                    skill = next(
+                        (s for s in skills if s.name == potential_skill_name),
+                        None,
+                    )
+                    if skill is None:
+                        # Try unprefixed exact match
+                        skill = next(
+                            (
+                                s
+                                for s in skills
+                                if ":" in s.name
+                                and s.name.split(":", 1)[1] == potential_skill_name
+                            ),
+                            None,
+                        )
+                    if skill is None:
+                        # Try prefix match on unprefixed part
+                        skill = next(
+                            (
+                                s
+                                for s in skills
+                                if ":" in s.name
+                                and s.name.split(":", 1)[1].startswith(
+                                    potential_skill_name
+                                )
+                            ),
+                            None,
+                        )
+
+                    if skill:
+                        # This is a skill invocation — load and resolve it
+                        body = load_skill_body(skill)
+                        if body:
+                            session_id = context.user_data.get("claude_session_id", "")
+                            resolved = resolve_skill_prompt(
+                                body, skill_args, session_id
+                            )
+                            # Frame the skill body as instructions, not a
+                            # user question — mirrors how the CLI's Skill
+                            # tool presents skills to Claude.
+                            args_line = (
+                                f"\nUser arguments: {skill_args}"
+                                if skill_args
+                                else ""
+                            )
+                            message_text = (
+                                f"<skill-invocation>\n"
+                                f"The user has invoked the /{skill.name} "
+                                f"skill. Follow the instructions in the "
+                                f"skill body below exactly as written."
+                                f"{args_line}\n"
+                                f"</skill-invocation>\n\n"
+                                f"<skill-body>\n{resolved}\n</skill-body>"
+                            )
+                            logger.info(
+                                "Skill invocation detected",
+                                skill_name=skill.name,
+                                user_id=user_id,
+                            )
+
+        # Restore persisted directory if not already set
+        storage = context.bot_data.get("storage")
+        if not context.user_data.get("current_directory") and storage:
+            persisted_dir = await storage.load_user_directory(user_id)
+            if persisted_dir:
+                persisted_path = Path(persisted_dir)
+                # Validate that persisted path is still in approved directories
+                if persisted_path.is_dir() and any(
+                    persisted_path == r or persisted_path.is_relative_to(r)
+                    for r in self.settings.approved_directories
+                ):
+                    context.user_data["current_directory"] = persisted_path
+                    logger.debug(
+                        "Restored user directory from database",
+                        user_id=user_id,
+                        directory=str(persisted_path),
+                    )
+
         # Rate limit check
         rate_limiter = context.bot_data.get("rate_limiter")
         if rate_limiter:
@@ -713,15 +1223,8 @@ class MessageOrchestrator:
         verbose_level = self._get_verbose_level(context)
         progress_msg = await update.message.reply_text("Working...")
 
-        claude_integration = context.bot_data.get("claude_integration")
-        if not claude_integration:
-            await progress_msg.edit_text(
-                "Claude integration not available. Check configuration."
-            )
-            return
-
         current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directory
+            "current_directory", self.settings.approved_directories[0]
         )
         session_id = context.user_data.get("claude_session_id")
 
@@ -741,20 +1244,35 @@ class MessageOrchestrator:
 
         success = True
         try:
-            claude_response = await claude_integration.run_command(
+            claude_response = await self._run_claude_query(
                 prompt=message_text,
-                working_directory=current_dir,
                 user_id=user_id,
+                current_dir=current_dir,
                 session_id=session_id,
-                on_stream=on_stream,
                 force_new=force_new,
+                on_stream=on_stream,
+                context=context,
             )
 
             # New session created successfully — clear the one-shot flag
             if force_new:
                 context.user_data["force_new_session"] = False
 
+            previous_session_id = context.user_data.get("claude_session_id")
             context.user_data["claude_session_id"] = claude_response.session_id
+
+            # Write to CLI history.jsonl so CLI /resume can discover bot sessions
+            if claude_response.session_id != previous_session_id:
+                current_dir = context.user_data.get(
+                    "current_directory",
+                    self.settings.approved_directories[0],
+                )
+                display_preview = message_text[:80] if message_text else ""
+                append_history_entry(
+                    session_id=claude_response.session_id,
+                    display=display_preview,
+                    project=str(current_dir),
+                )
 
             # Track directory changes
             from .handlers.message import _update_working_directory_from_claude_response
@@ -762,20 +1280,6 @@ class MessageOrchestrator:
             _update_working_directory_from_claude_response(
                 claude_response, context, self.settings, user_id
             )
-
-            # Store interaction
-            storage = context.bot_data.get("storage")
-            if storage:
-                try:
-                    await storage.save_claude_interaction(
-                        user_id=user_id,
-                        session_id=claude_response.session_id,
-                        prompt=message_text,
-                        response=claude_response,
-                        ip_address=None,
-                    )
-                except Exception as e:
-                    logger.warning("Failed to log interaction", error=str(e))
 
             # Format response (no reply_markup — strip keyboards)
             from .utils.formatting import ResponseFormatter
@@ -913,13 +1417,6 @@ class MessageOrchestrator:
                 return
 
         # Process with Claude
-        claude_integration = context.bot_data.get("claude_integration")
-        if not claude_integration:
-            await progress_msg.edit_text(
-                "Claude integration not available. Check configuration."
-            )
-            return
-
         current_dir = context.user_data.get(
             "current_directory", self.settings.approved_directory
         )
@@ -937,13 +1434,14 @@ class MessageOrchestrator:
 
         heartbeat = self._start_typing_heartbeat(chat)
         try:
-            claude_response = await claude_integration.run_command(
+            claude_response = await self._run_claude_query(
                 prompt=prompt,
-                working_directory=current_dir,
                 user_id=user_id,
+                current_dir=current_dir,
                 session_id=session_id,
-                on_stream=on_stream,
                 force_new=force_new,
+                on_stream=on_stream,
+                context=context,
             )
 
             if force_new:
@@ -1007,13 +1505,6 @@ class MessageOrchestrator:
                 photo, update.message.caption
             )
 
-            claude_integration = context.bot_data.get("claude_integration")
-            if not claude_integration:
-                await progress_msg.edit_text(
-                    "Claude integration not available. Check configuration."
-                )
-                return
-
             current_dir = context.user_data.get(
                 "current_directory", self.settings.approved_directory
             )
@@ -1031,13 +1522,14 @@ class MessageOrchestrator:
 
             heartbeat = self._start_typing_heartbeat(chat)
             try:
-                claude_response = await claude_integration.run_command(
+                claude_response = await self._run_claude_query(
                     prompt=processed_image.prompt,
-                    working_directory=current_dir,
                     user_id=user_id,
+                    current_dir=current_dir,
                     session_id=session_id,
-                    on_stream=on_stream,
                     force_new=force_new,
+                    on_stream=on_stream,
+                    context=context,
                 )
             finally:
                 heartbeat.cancel()
@@ -1079,18 +1571,42 @@ class MessageOrchestrator:
     ) -> None:
         """List repos in workspace or switch to one.
 
-        /repo          — list subdirectories with git indicators
+        /repo          — list all workspace roots and their subdirectories
         /repo <name>   — switch to that directory, resume session if available
         """
         args = update.message.text.split()[1:] if update.message.text else []
-        base = self.settings.approved_directory
-        current_dir = context.user_data.get("current_directory", base)
+        roots = self.settings.approved_directories
+        storage = context.bot_data.get("storage")
+
+        # Get current directory
+        current_dir = context.user_data.get("current_directory")
+        if not current_dir and storage:
+            # Try to restore from database
+            persisted = await storage.load_user_directory(update.effective_user.id)
+            if persisted:
+                current_dir = Path(persisted)
+                context.user_data["current_directory"] = current_dir
 
         if args:
-            # Switch to named repo
+            # Switch to named repo - search across all roots
             target_name = args[0]
-            target_path = base / target_name
-            if not target_path.is_dir():
+            target_path = None
+
+            # Try each root
+            for root in roots:
+                candidate = root / target_name
+                if candidate.is_dir():
+                    target_path = candidate
+                    break
+                # Also check if target_name is an absolute path within roots
+                candidate_abs = Path(target_name).resolve()
+                if candidate_abs.is_dir() and any(
+                    candidate_abs == r or candidate_abs.is_relative_to(r) for r in roots
+                ):
+                    target_path = candidate_abs
+                    break
+
+            if not target_path:
                 await update.message.reply_text(
                     f"Directory not found: <code>{escape_html(target_name)}</code>",
                     parse_mode="HTML",
@@ -1099,15 +1615,27 @@ class MessageOrchestrator:
 
             context.user_data["current_directory"] = target_path
 
-            # Try to find a resumable session
-            claude_integration = context.bot_data.get("claude_integration")
-            session_id = None
-            if claude_integration:
-                existing = await claude_integration._find_resumable_session(
-                    update.effective_user.id, target_path
+            # Persist to database
+            if storage:
+                await storage.save_user_directory(
+                    update.effective_user.id, str(target_path)
                 )
-                if existing:
-                    session_id = existing.session_id
+
+            # Try to find a resumable session from history.jsonl
+            session_id = None
+            client_manager_repo: Optional[ClientManager] = context.bot_data.get(
+                "client_manager"
+            )
+            if client_manager_repo:
+                session_id = client_manager_repo.get_latest_session(str(target_path))
+            else:
+                # Legacy fallback: only reachable in classic mode or tests
+                # without a ClientManager. Agentic mode always has one.
+                claude_integration = context.bot_data.get("claude_integration")
+                if claude_integration:
+                    session_id = claude_integration._find_resumable_session_id(
+                        target_path
+                    )
             context.user_data["claude_session_id"] = session_id
 
             is_git = (target_path / ".git").is_dir()
@@ -1115,92 +1643,554 @@ class MessageOrchestrator:
             session_badge = " · session resumed" if session_id else ""
 
             await update.message.reply_text(
-                f"Switched to <code>{escape_html(target_name)}/</code>"
+                f"Switched to <code>{escape_html(target_path.name)}/</code>"
                 f"{git_badge}{session_badge}",
                 parse_mode="HTML",
             )
             return
 
-        # No args — list repos
-        try:
-            entries = sorted(
-                [
-                    d
-                    for d in base.iterdir()
-                    if d.is_dir() and not d.name.startswith(".")
-                ],
-                key=lambda d: d.name,
-            )
-        except OSError as e:
-            await update.message.reply_text(f"Error reading workspace: {e}")
-            return
+        # No args — list all workspace roots and their subdirectories
+        lines: List[str] = []
+        keyboard_rows: List[list] = []  # type: ignore[type-arg]
 
-        if not entries:
+        # First, add workspace root buttons if multiple roots
+        if len(roots) > 1:
+            lines.append("<b>📁 Workspaces</b>")
+            root_row = []
+            for root in roots:
+                root_name = root.name
+                marker = " \u25c0" if current_dir == root else ""
+                lines.append(f"  <code>{escape_html(root_name)}/</code>{marker}")
+                root_row.append(
+                    InlineKeyboardButton(root_name, callback_data=f"cd:{str(root)}")
+                )
+                if len(root_row) == 2:
+                    keyboard_rows.append(root_row)
+                    root_row = []
+            if root_row:
+                keyboard_rows.append(root_row)
+            lines.append("")  # Blank line separator
+
+        # List subdirectories for each root
+        for root in roots:
+            try:
+                entries = sorted(
+                    [
+                        d
+                        for d in root.iterdir()
+                        if d.is_dir() and not d.name.startswith(".")
+                    ],
+                    key=lambda d: d.name,
+                )
+            except OSError as e:
+                logger.warning(
+                    "Error reading workspace root", root=str(root), error=str(e)
+                )
+                continue
+
+            if not entries:
+                continue
+
+            # Section header for this root (only if multiple roots)
+            if len(roots) > 1:
+                lines.append(f"<b>📂 {escape_html(root.name)}/</b>")
+
+            for d in entries:
+                is_git = (d / ".git").is_dir()
+                icon = "\U0001f4e6" if is_git else "\U0001f4c1"
+                marker = " \u25c0" if d == current_dir else ""
+                rel_name = d.name if len(roots) == 1 else f"{root.name}/{d.name}"
+                lines.append(f"{icon} <code>{escape_html(d.name)}/</code>{marker}")
+
+            # Build inline keyboard (2 per row)
+            for i in range(0, len(entries), 2):
+                row = []
+                for j in range(2):
+                    if i + j < len(entries):
+                        d = entries[i + j]
+                        name = d.name
+                        row.append(
+                            InlineKeyboardButton(name, callback_data=f"cd:{str(d)}")
+                        )
+                keyboard_rows.append(row)
+
+            if len(roots) > 1:
+                lines.append("")  # Blank line between roots
+
+        if not lines:
+            workspaces_list = "\n".join(
+                f"  • <code>{escape_html(str(r))}</code>" for r in roots
+            )
             await update.message.reply_text(
-                f"No repos in <code>{escape_html(str(base))}</code>.\n"
+                f"No repos in workspaces:\n{workspaces_list}\n\n"
                 'Clone one by telling me, e.g. <i>"clone org/repo"</i>.',
                 parse_mode="HTML",
             )
             return
 
-        lines: List[str] = []
+        reply_markup = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
+
+        header = "<b>Repos</b>\n\n" if len(roots) == 1 else ""
+        await update.message.reply_text(
+            header + "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+
+    async def agentic_commands(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show available skills as inline keyboard buttons."""
+        current_dir = context.user_data.get(
+            "current_directory", self.settings.approved_directories[0]
+        )
+
+        # Discover skills
+        skills = discover_skills(project_dir=Path(current_dir))
+
+        if not skills:
+            await update.message.reply_text(
+                "📝 <b>No Skills Found</b>\n\n"
+                "Create skills in:\n"
+                "  • <code>.claude/skills/&lt;name&gt;/SKILL.md</code> (project)\n"
+                "  • <code>~/.claude/skills/&lt;name&gt;/SKILL.md</code> (personal)\n\n"
+                "Or install plugins via Claude Code CLI.\n\n"
+                "Legacy commands also supported:\n"
+                "  • <code>.claude/commands/&lt;name&gt;.md</code>\n"
+                "  • <code>~/.claude/commands/&lt;name&gt;.md</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        # Group by source
+        project_skills = [
+            s for s in skills if s.source in ("project", "legacy_project")
+        ]
+        personal_skills = [
+            s for s in skills if s.source in ("personal", "legacy_personal")
+        ]
+        plugin_skills = [s for s in skills if s.source == "plugin"]
+
+        # Helper to build a button for a skill
+        def _skill_button(skill: Any) -> InlineKeyboardButton:
+            if skill.argument_hint:
+                return InlineKeyboardButton(
+                    f"{skill.name} ...",
+                    switch_inline_query_current_chat=f"/{skill.name} ",
+                )
+            return InlineKeyboardButton(skill.name, callback_data=f"skill:{skill.name}")
+
+        # Build inline keyboard — project/personal get one per row,
+        # plugin skills get two per row for compactness
         keyboard_rows: List[list] = []  # type: ignore[type-arg]
-        current_name = current_dir.name if current_dir != base else None
 
-        for d in entries:
-            is_git = (d / ".git").is_dir()
-            icon = "\U0001f4e6" if is_git else "\U0001f4c1"
-            marker = " \u25c0" if d.name == current_name else ""
-            lines.append(f"{icon} <code>{escape_html(d.name)}/</code>{marker}")
+        for group in (project_skills, personal_skills):
+            for skill in group:
+                keyboard_rows.append([_skill_button(skill)])
 
-        # Build inline keyboard (2 per row)
-        for i in range(0, len(entries), 2):
-            row = []
-            for j in range(2):
-                if i + j < len(entries):
-                    name = entries[i + j].name
-                    row.append(InlineKeyboardButton(name, callback_data=f"cd:{name}"))
-            keyboard_rows.append(row)
+        # Plugin skills: 2 per row
+        plugin_row: list = []  # type: ignore[type-arg]
+        for skill in plugin_skills:
+            plugin_row.append(_skill_button(skill))
+            if len(plugin_row) == 2:
+                keyboard_rows.append(plugin_row)
+                plugin_row = []
+        if plugin_row:
+            keyboard_rows.append(plugin_row)
 
         reply_markup = InlineKeyboardMarkup(keyboard_rows)
 
+        # Build message text — project/personal get descriptions,
+        # plugin skills are name-only grouped by plugin for compactness
+        lines: List[str] = ["<b>Available Skills</b>\n"]
+
+        for label, group in [
+            ("\U0001f4c2 Project", project_skills),
+            ("\U0001f464 Personal", personal_skills),
+        ]:
+            if not group:
+                continue
+            lines.append(f"<b>{label}</b>")
+            for skill in group:
+                desc_line = f"  \u2022 <code>{skill.name}</code>"
+                if skill.description:
+                    desc_line += f" \u2014 {escape_html(skill.description[:80])}"
+                if skill.argument_hint:
+                    desc_line += f" <i>({escape_html(skill.argument_hint)})</i>"
+                lines.append(desc_line)
+            lines.append("")
+
+        # Plugin skills: group by plugin name, names only
+        if plugin_skills:
+            # Group by plugin prefix (e.g., "superpowers" from "superpowers:brainstorming")
+            plugin_groups: Dict[str, List[str]] = {}
+            for skill in plugin_skills:
+                if ":" in skill.name:
+                    prefix, short_name = skill.name.split(":", 1)
+                else:
+                    prefix, short_name = "other", skill.name
+                plugin_groups.setdefault(prefix, []).append(short_name)
+
+            lines.append("\U0001f4e6 <b>Plugin Skills</b>")
+            for plugin_name, skill_names in sorted(plugin_groups.items()):
+                names_str = ", ".join(f"<code>{n}</code>" for n in sorted(skill_names))
+                lines.append(f"  <b>{escape_html(plugin_name)}</b>: {names_str}")
+
+        # Telegram message limit is 4096 chars — truncate if needed
+        message = "\n".join(lines)
+        if len(message) > 4000:
+            message = message[:3950] + "\n\n<i>... truncated</i>"
+
         await update.message.reply_text(
-            "<b>Repos</b>\n\n" + "\n".join(lines),
+            message,
             parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+
+    async def agentic_sessions(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show session picker for current directory."""
+        # Get current directory
+        current_directory = context.user_data.get("current_directory")
+        if not current_directory:
+            # Fall back to first approved directory
+            roots = self.settings.approved_directories
+            if roots:
+                current_directory = roots[0]
+            else:
+                await update.message.reply_text(
+                    "No approved directories configured.",
+                    parse_mode="Markdown",
+                )
+                return
+
+        # Read Claude history and filter by current directory
+        history_entries = read_claude_history()
+        filtered_entries = filter_by_directory(history_entries, current_directory)
+
+        # Check history format health
+        from ..claude.history import DEFAULT_HISTORY_PATH
+
+        health_warning = check_history_format_health(DEFAULT_HISTORY_PATH)
+        if health_warning:
+            await update.message.reply_text(
+                f"⚠️ {health_warning}",
+                parse_mode="Markdown",
+            )
+
+        # Sort by timestamp descending (newest first)
+        sorted_entries = sorted(
+            filtered_entries, key=lambda e: e.timestamp, reverse=True
+        )
+
+        # Build inline keyboard
+        keyboard_rows: List[list] = []  # type: ignore[type-arg]
+
+        if sorted_entries:
+            from datetime import UTC, datetime
+
+            # Cap at 10 sessions
+            for entry in sorted_entries[:10]:
+                # Format date from millisecond timestamp
+                ts_dt = datetime.fromtimestamp(entry.timestamp / 1000.0, tz=UTC)
+                date_str = ts_dt.strftime("%m/%d")
+                # Truncate display name to 45 chars
+                display_name = (entry.display or entry.session_id[:12])[:45]
+                button_label = f"{date_str} — {display_name}"
+
+                keyboard_rows.append(
+                    [
+                        InlineKeyboardButton(
+                            button_label, callback_data=f"session:{entry.session_id}"
+                        )
+                    ]
+                )
+
+        # Always add "New Session" button at the end
+        keyboard_rows.append(
+            [InlineKeyboardButton("+ New Session", callback_data="session:new")]
+        )
+
+        reply_markup = InlineKeyboardMarkup(keyboard_rows)
+
+        # Build message
+        dir_name = (
+            current_directory.name
+            if hasattr(current_directory, "name")
+            else str(current_directory)
+        )
+        if sorted_entries:
+            message = f"*Sessions in `{dir_name}/`*\n\nSelect a session to resume or start a new one:"
+        else:
+            message = f"*No sessions found in `{dir_name}/`*\n\nStart a new session:"
+
+        await update.message.reply_text(
+            message,
+            parse_mode="Markdown",
             reply_markup=reply_markup,
         )
 
     async def _agentic_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Handle cd: callbacks — switch directory and resume session if available."""
+        """Handle cd:, session:, skill:, and model: callbacks."""
         query = update.callback_query
         await query.answer()
 
         data = query.data
-        _, project_name = data.split(":", 1)
+        prefix, value = data.split(":", 1)
 
-        base = self.settings.approved_directory
-        new_path = base / project_name
+        # Handle model callbacks
+        if prefix == "model":
+            await self.handle_model_callback(update, context)
+            return
 
-        if not new_path.is_dir():
+        # Handle skill callbacks
+        if prefix == "skill":
+            skill_name = value
+            current_dir = context.user_data.get(
+                "current_directory", self.settings.approved_directories[0]
+            )
+
+            # Discover and find the skill
+            skills = discover_skills(project_dir=Path(current_dir))
+            skill = next((s for s in skills if s.name == skill_name), None)
+
+            if not skill:
+                await query.edit_message_text(
+                    f"❌ Skill not found: <code>{escape_html(skill_name)}</code>",
+                    parse_mode="HTML",
+                )
+                return
+
+            # Load and resolve skill body
+            body = load_skill_body(skill)
+            if not body:
+                await query.edit_message_text(
+                    f"❌ Failed to load skill: <code>{escape_html(skill_name)}</code>",
+                    parse_mode="HTML",
+                )
+                return
+
+            session_id = context.user_data.get("claude_session_id", "")
+            prompt = resolve_skill_prompt(body, "", session_id)
+
+            # Show running message
             await query.edit_message_text(
-                f"Directory not found: <code>{escape_html(project_name)}</code>",
+                f"⚙️ Running skill: <b>{escape_html(skill_name)}</b>...",
+                parse_mode="HTML",
+            )
+
+            # Execute via Claude
+            user_id = query.from_user.id
+            force_new = bool(context.user_data.get("force_new_session"))
+
+            verbose_level = self._get_verbose_level(context)
+            tool_log: List[Dict[str, Any]] = []
+            start_time = time.time()
+
+            # Create a progress message for stream updates
+            progress_msg = await query.message.reply_text("Working...")
+            on_stream = self._make_stream_callback(
+                verbose_level, progress_msg, tool_log, start_time
+            )
+
+            chat = query.message.chat
+            heartbeat = self._start_typing_heartbeat(chat)
+
+            success = True
+            try:
+                claude_response = await self._run_claude_query(
+                    prompt=prompt,
+                    user_id=user_id,
+                    current_dir=current_dir,
+                    session_id=session_id,
+                    force_new=force_new,
+                    on_stream=on_stream,
+                    context=context,
+                )
+
+                if force_new:
+                    context.user_data["force_new_session"] = False
+
+                context.user_data["claude_session_id"] = claude_response.session_id
+
+                # Track directory changes
+                from .handlers.message import (
+                    _update_working_directory_from_claude_response,
+                )
+
+                _update_working_directory_from_claude_response(
+                    claude_response, context, self.settings, user_id
+                )
+
+                # Format response
+                from .utils.formatting import ResponseFormatter
+
+                formatter = ResponseFormatter(self.settings)
+                formatted_messages = formatter.format_claude_response(
+                    claude_response.content
+                )
+
+            except Exception as e:
+                success = False
+                logger.error(
+                    "Claude skill execution failed", error=str(e), user_id=user_id
+                )
+                from .handlers.message import _format_error_message
+                from .utils.formatting import FormattedMessage
+
+                formatted_messages = [
+                    FormattedMessage(_format_error_message(e), parse_mode="HTML")
+                ]
+            finally:
+                heartbeat.cancel()
+
+            await progress_msg.delete()
+
+            for i, message in enumerate(formatted_messages):
+                if not message.text or not message.text.strip():
+                    continue
+                try:
+                    await query.message.reply_text(
+                        message.text,
+                        parse_mode=message.parse_mode,
+                        reply_markup=None,
+                    )
+                    if i < len(formatted_messages) - 1:
+                        await asyncio.sleep(0.5)
+                except Exception as send_err:
+                    logger.warning(
+                        "Failed to send HTML response, retrying as plain text",
+                        error=str(send_err),
+                        message_index=i,
+                    )
+                    try:
+                        await query.message.reply_text(
+                            message.text,
+                            reply_markup=None,
+                        )
+                    except Exception as plain_err:
+                        await query.message.reply_text(
+                            f"Failed to deliver response "
+                            f"(Telegram error: {str(plain_err)[:150]}). "
+                            f"Please try again."
+                        )
+
+            # Audit log
+            audit_logger = context.bot_data.get("audit_logger")
+            if audit_logger:
+                await audit_logger.log_command(
+                    user_id=user_id,
+                    command="skill",
+                    args=[skill_name],
+                    success=success,
+                )
+            return
+
+        # Handle session callbacks
+        if prefix == "session":
+            if value == "new":
+                context.user_data["force_new_session"] = True
+                await query.edit_message_text(
+                    "✨ Starting new session",
+                    parse_mode="HTML",
+                )
+            else:
+                # Resume session by ID
+                context.user_data["claude_session_id"] = value
+
+                # Load recent messages from session transcript
+                current_dir = context.user_data.get(
+                    "current_directory",
+                    self.settings.approved_directories[0],
+                )
+                recent_lines: List[str] = ["📂 <b>Resumed session</b>\n"]
+
+                try:
+                    transcript = read_session_transcript(
+                        session_id=value,
+                        project_dir=str(current_dir),
+                        limit=3,
+                    )
+                    if transcript:
+                        recent_lines.append("<b>Recent:</b>")
+                        for msg in transcript:
+                            preview = msg.text[:120]
+                            if len(msg.text) > 120:
+                                preview += "…"
+                            label = "You" if msg.role == "user" else "Claude"
+                            recent_lines.append(
+                                f"  <b>{label}:</b> {escape_html(preview)}"
+                            )
+                except Exception:
+                    pass
+
+                await query.edit_message_text(
+                    "\n".join(recent_lines),
+                    parse_mode="HTML",
+                )
+
+            # Audit log
+            audit_logger = context.bot_data.get("audit_logger")
+            if audit_logger:
+                await audit_logger.log_command(
+                    user_id=query.from_user.id,
+                    command="session",
+                    args=[value],
+                    success=True,
+                )
+            return
+
+        # Handle cd callbacks (existing logic)
+        roots = self.settings.approved_directories
+        storage = context.bot_data.get("storage")
+        path_str = value
+
+        # Parse the path - could be relative name or absolute path
+        new_path = None
+        if Path(path_str).is_absolute():
+            # Absolute path from callback
+            candidate = Path(path_str)
+            if candidate.is_dir() and any(
+                candidate == r or candidate.is_relative_to(r) for r in roots
+            ):
+                new_path = candidate
+        else:
+            # Relative name - search across all roots
+            for root in roots:
+                candidate = root / path_str
+                if candidate.is_dir():
+                    new_path = candidate
+                    break
+
+        if not new_path:
+            await query.edit_message_text(
+                f"Directory not found: <code>{escape_html(path_str)}</code>",
                 parse_mode="HTML",
             )
             return
 
         context.user_data["current_directory"] = new_path
 
+        # Persist to database
+        if storage:
+            await storage.save_user_directory(query.from_user.id, str(new_path))
+
         # Look for a resumable session instead of always clearing
-        claude_integration = context.bot_data.get("claude_integration")
         session_id = None
-        if claude_integration:
-            existing = await claude_integration._find_resumable_session(
-                query.from_user.id, new_path
-            )
-            if existing:
-                session_id = existing.session_id
+        client_manager_cd: Optional[ClientManager] = context.bot_data.get(
+            "client_manager"
+        )
+        if client_manager_cd:
+            session_id = client_manager_cd.get_latest_session(str(new_path))
+        else:
+            # Legacy fallback: only reachable in classic mode or tests
+            # without a ClientManager. Agentic mode always has one.
+            claude_integration = context.bot_data.get("claude_integration")
+            if claude_integration:
+                session_id = claude_integration._find_resumable_session_id(new_path)
         context.user_data["claude_session_id"] = session_id
 
         is_git = (new_path / ".git").is_dir()
@@ -1208,7 +2198,7 @@ class MessageOrchestrator:
         session_badge = " · session resumed" if session_id else ""
 
         await query.edit_message_text(
-            f"Switched to <code>{escape_html(project_name)}/</code>"
+            f"Switched to <code>{escape_html(new_path.name)}/</code>"
             f"{git_badge}{session_badge}",
             parse_mode="HTML",
         )
@@ -1219,6 +2209,6 @@ class MessageOrchestrator:
             await audit_logger.log_command(
                 user_id=query.from_user.id,
                 command="cd",
-                args=[project_name],
+                args=[str(new_path)],
                 success=True,
             )

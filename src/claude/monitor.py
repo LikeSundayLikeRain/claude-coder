@@ -1,13 +1,13 @@
-"""Bash directory boundary enforcement for Claude tool calls.
+"""Bash directory boundary enforcement and tool permission callbacks for Claude.
 
-Provides the check_bash_directory_boundary() function used by the SDK's
-can_use_tool callback to prevent filesystem-modifying commands from
-operating outside the approved directory.
+Provides check_bash_directory_boundary() and _make_can_use_tool_callback()
+used by the SDK's can_use_tool hook to enforce filesystem boundaries before
+tool execution.
 """
 
 import shlex
 from pathlib import Path
-from typing import Optional, Set, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 import structlog
 
@@ -83,6 +83,15 @@ def check_bash_directory_boundary(
     Returns (True, None) if the command is safe, or (False, error_message) if it
     attempts to operate outside the approved directory boundary.
     """
+    # Support both single Path and list of Paths for backward compatibility
+    from typing import List, Union
+
+    approved_dirs: List[Path]
+    if isinstance(approved_directory, list):
+        approved_dirs = [d.resolve() for d in approved_directory]
+    else:
+        approved_dirs = [approved_directory.resolve()]
+
     try:
         tokens = shlex.split(command)
     except ValueError:
@@ -107,8 +116,6 @@ def check_bash_directory_boundary(
 
     if current_chain:
         command_chains.append(current_chain)
-
-    resolved_approved = approved_directory.resolve()
 
     # Check each command in the chain
     for cmd_tokens in command_chains:
@@ -146,11 +153,15 @@ def check_bash_directory_boundary(
                 else:
                     resolved = (working_directory / token).resolve()
 
-                if not _is_within_directory(resolved, resolved_approved):
+                # Check if path is within ANY of the approved directories
+                within_any = any(
+                    _is_within_directory(resolved, approved_dir)
+                    for approved_dir in approved_dirs
+                )
+                if not within_any:
                     return False, (
                         f"Directory boundary violation: '{base_command}' targets "
-                        f"'{token}' which is outside approved directory "
-                        f"'{resolved_approved}'"
+                        f"'{token}' which is outside all approved directories"
                     )
             except (ValueError, OSError):
                 # If path resolution fails, the command might be malformed or
@@ -198,3 +209,66 @@ def _is_within_directory(path: Path, directory: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _make_can_use_tool_callback(
+    security_validator: Any,
+    working_directory: Path,
+    approved_directory: Path,
+) -> Any:
+    """Create a can_use_tool callback for SDK-level tool permission validation.
+
+    The callback validates file path boundaries and bash directory boundaries
+    *before* the SDK executes the tool, providing preventive security enforcement.
+    """
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+    _FILE_TOOLS = {"Write", "Edit", "Read", "create_file", "edit_file", "read_file"}
+    _BASH_TOOLS = {"Bash", "bash", "shell"}
+
+    async def can_use_tool(
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        context: Any,
+    ) -> Any:
+        # File path validation
+        if tool_name in _FILE_TOOLS:
+            file_path = tool_input.get("file_path") or tool_input.get("path")
+            if file_path:
+                # Allow Claude Code internal paths (~/.claude/plans/, etc.)
+                if _is_claude_internal_path(file_path):
+                    return PermissionResultAllow()
+
+                valid, _resolved, error = security_validator.validate_path(
+                    file_path, working_directory
+                )
+                if not valid:
+                    logger.warning(
+                        "can_use_tool denied file operation",
+                        tool_name=tool_name,
+                        file_path=file_path,
+                        error=error,
+                    )
+                    return PermissionResultDeny(message=error or "Invalid file path")
+
+        # Bash directory boundary validation
+        if tool_name in _BASH_TOOLS:
+            command = tool_input.get("command", "")
+            if command:
+                valid, error = check_bash_directory_boundary(
+                    command, working_directory, security_validator.approved_directories
+                )
+                if not valid:
+                    logger.warning(
+                        "can_use_tool denied bash command",
+                        tool_name=tool_name,
+                        command=command,
+                        error=error,
+                    )
+                    return PermissionResultDeny(
+                        message=error or "Bash directory boundary violation"
+                    )
+
+        return PermissionResultAllow()
+
+    return can_use_tool

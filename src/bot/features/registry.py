@@ -65,7 +65,7 @@ class FeatureRegistry:
         # Session export - classic mode only
         if not self.config.agentic_mode:
             try:
-                self.features["session_export"] = SessionExporter(storage=self.storage)
+                self.features["session_export"] = SessionExporter()
                 logger.info("Session export feature enabled")
             except Exception as e:
                 logger.error("Failed to initialize session export", error=str(e))

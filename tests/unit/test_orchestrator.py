@@ -82,8 +82,8 @@ def deps():
     }
 
 
-def test_agentic_registers_5_commands(agentic_settings, deps):
-    """Agentic mode registers start, new, status, verbose, repo commands."""
+def test_agentic_registers_commands(agentic_settings, deps):
+    """Agentic mode registers start, new, stop, status, verbose, compact, model, repo, sessions, commands."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     app = MagicMock()
     app.add_handler = MagicMock()
@@ -100,12 +100,17 @@ def test_agentic_registers_5_commands(agentic_settings, deps):
     ]
     commands = [h[0][0].commands for h in cmd_handlers]
 
-    assert len(cmd_handlers) == 5
+    assert len(cmd_handlers) == 10
     assert frozenset({"start"}) in commands
     assert frozenset({"new"}) in commands
+    assert frozenset({"stop"}) in commands
     assert frozenset({"status"}) in commands
     assert frozenset({"verbose"}) in commands
+    assert frozenset({"compact"}) in commands
+    assert frozenset({"model"}) in commands
     assert frozenset({"repo"}) in commands
+    assert frozenset({"sessions"}) in commands
+    assert frozenset({"commands"}) in commands
 
 
 def test_classic_registers_13_commands(classic_settings, deps):
@@ -148,20 +153,31 @@ def test_agentic_registers_text_document_photo_handlers(agentic_settings, deps):
         if isinstance(call[0][0], CallbackQueryHandler)
     ]
 
-    # 3 message handlers (text, document, photo)
-    assert len(msg_handlers) == 3
-    # 1 callback handler (for cd: only)
+    # 4 message handlers (text, unrecognized commands, document, photo)
+    assert len(msg_handlers) == 4
+    # 1 callback handler (for cd:, session:, skill:, model: patterns)
     assert len(cb_handlers) == 1
 
 
 async def test_agentic_bot_commands(agentic_settings, deps):
-    """Agentic mode returns 5 bot commands."""
+    """Agentic mode returns 10 bot commands."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     commands = await orchestrator.get_bot_commands()
 
-    assert len(commands) == 5
+    assert len(commands) == 10
     cmd_names = [c.command for c in commands]
-    assert cmd_names == ["start", "new", "status", "verbose", "repo"]
+    assert cmd_names == [
+        "start",
+        "new",
+        "stop",
+        "status",
+        "verbose",
+        "compact",
+        "model",
+        "repo",
+        "sessions",
+        "commands",
+    ]
 
 
 async def test_classic_bot_commands(classic_settings, deps):
@@ -212,6 +228,7 @@ async def test_agentic_new_resets_session(agentic_settings, deps):
 
     context = MagicMock()
     context.user_data = {"claude_session_id": "old-session-123"}
+    context.bot_data = {}
 
     await orchestrator.agentic_new(update, context)
 
@@ -220,7 +237,7 @@ async def test_agentic_new_resets_session(agentic_settings, deps):
 
 
 async def test_agentic_status_compact(agentic_settings, deps):
-    """Agentic /status returns compact one-line status."""
+    """Agentic /status returns session status with directory and workspace info."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
 
     update = MagicMock()
@@ -235,7 +252,9 @@ async def test_agentic_status_compact(agentic_settings, deps):
 
     call_args = update.message.reply_text.call_args
     text = call_args.args[0]
-    assert "Session: none" in text
+    # New format includes HTML tags and more detailed info
+    assert "<b>Session:</b> none (send a message to start)" in text
+    assert "<b>Directory:</b>" in text
 
 
 async def test_agentic_text_calls_claude(agentic_settings, deps):

@@ -12,10 +12,9 @@ import structlog
 
 from src import __version__
 from src.bot.core import ClaudeCodeBot
-from src.claude import (
-    ClaudeIntegration,
-    SessionManager,
-)
+from src.claude import ClaudeIntegration
+from src.claude.client_manager import ClientManager
+from src.claude.options import OptionsBuilder
 from src.claude.sdk_integration import ClaudeSDKManager
 from src.config.features import FeatureFlags
 from src.config.settings import Settings
@@ -36,7 +35,6 @@ from src.security.auth import (
 from src.security.rate_limiter import RateLimiter
 from src.security.validators import SecurityValidator
 from src.storage.facade import Storage
-from src.storage.session_storage import SQLiteSessionStorage
 
 
 def setup_logging(debug: bool = False) -> None:
@@ -127,7 +125,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
 
     auth_manager = AuthenticationManager(providers)
     security_validator = SecurityValidator(
-        config.approved_directory,
+        approved_directories=config.approved_directories,
         disable_security_patterns=config.disable_security_patterns,
     )
     rate_limiter = RateLimiter(config)
@@ -136,10 +134,6 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     audit_storage = InMemoryAuditStorage()  # TODO: Use database storage in production
     audit_logger = AuditLogger(audit_storage)
 
-    # Create Claude integration components with persistent storage
-    session_storage = SQLiteSessionStorage(storage.db_manager)
-    session_manager = SessionManager(config, session_storage)
-
     # Create Claude SDK manager and integration facade
     logger.info("Using Claude Python SDK integration")
     sdk_manager = ClaudeSDKManager(config, security_validator=security_validator)
@@ -147,7 +141,16 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     claude_integration = ClaudeIntegration(
         config=config,
         sdk_manager=sdk_manager,
-        session_manager=session_manager,
+    )
+
+    # Create ClientManager for persistent SDK connections (agentic mode)
+    options_builder = OptionsBuilder(
+        security_validator=security_validator,
+        cli_path=config.claude_cli_path,
+    )
+    client_manager = ClientManager(
+        bot_session_repo=storage.bot_sessions,
+        options_builder=options_builder,
     )
 
     # --- Event bus and agentic platform components ---
@@ -177,6 +180,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         "rate_limiter": rate_limiter,
         "audit_logger": audit_logger,
         "claude_integration": claude_integration,
+        "client_manager": client_manager,
         "storage": storage,
         "event_bus": event_bus,
         "project_registry": None,
@@ -194,6 +198,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     return {
         "bot": bot,
         "claude_integration": claude_integration,
+        "client_manager": client_manager,
         "storage": storage,
         "config": config,
         "features": features,
@@ -209,6 +214,7 @@ async def run_application(app: Dict[str, Any]) -> None:
     logger = structlog.get_logger()
     bot: ClaudeCodeBot = app["bot"]
     claude_integration: ClaudeIntegration = app["claude_integration"]
+    client_manager: ClientManager = app["client_manager"]
     storage: Storage = app["storage"]
     config: Settings = app["config"]
     features: FeatureFlags = app["features"]
@@ -273,6 +279,9 @@ async def run_application(app: Dict[str, Any]) -> None:
                     failed=sync_result.failed,
                     deactivated=sync_result.deactivated,
                 )
+
+        # Start client manager cleanup loop
+        client_manager.start_cleanup_loop()
 
         # Now wire up components that need the Telegram Bot instance
         telegram_bot = bot.app.bot
@@ -358,6 +367,8 @@ async def run_application(app: Dict[str, Any]) -> None:
                 await notification_service.stop()
             await event_bus.stop()
             await bot.stop()
+            client_manager.stop_cleanup_loop()
+            await client_manager.disconnect_all()
             await claude_integration.shutdown()
             await storage.close()
         except Exception as e:

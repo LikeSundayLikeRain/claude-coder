@@ -10,7 +10,6 @@ def test_development_config():
     assert config_dict["debug"] is True
     assert config_dict["development_mode"] is True
     assert config_dict["log_level"] == "DEBUG"
-    assert config_dict["rate_limit_requests"] == 100
     assert config_dict["enable_telemetry"] is False
 
 

@@ -170,14 +170,11 @@ async def handle_cd_callback(
 
         resumed_session_info = ""
         if claude_integration:
-            existing_session = await claude_integration._find_resumable_session(
-                user_id, new_path
-            )
-            if existing_session:
-                context.user_data["claude_session_id"] = existing_session.session_id
+            resumable_id = claude_integration._find_resumable_session_id(new_path)
+            if resumable_id:
+                context.user_data["claude_session_id"] = resumable_id
                 resumed_session_info = (
-                    f"\n🔄 Resumed session <code>{escape_html(existing_session.session_id[:8])}...</code> "
-                    f"({existing_session.message_count} messages)"
+                    f"\n🔄 Resumed session <code>{escape_html(resumable_id[:8])}...</code>"
                 )
             else:
                 context.user_data["claude_session_id"] = None

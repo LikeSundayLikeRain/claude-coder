@@ -689,14 +689,11 @@ async def change_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         resumed_session_info = ""
         if claude_integration:
-            existing_session = await claude_integration._find_resumable_session(
-                user_id, resolved_path
-            )
-            if existing_session:
-                context.user_data["claude_session_id"] = existing_session.session_id
+            resumable_id = claude_integration._find_resumable_session_id(resolved_path)
+            if resumable_id:
+                context.user_data["claude_session_id"] = resumable_id
                 resumed_session_info = (
-                    f"\n🔄 Resumed session <code>{existing_session.session_id[:8]}...</code> "
-                    f"({existing_session.message_count} messages)"
+                    f"\n🔄 Resumed session <code>{resumable_id[:8]}...</code>"
                 )
             else:
                 # No session for this directory - clear the current one
@@ -891,13 +888,10 @@ async def session_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "claude_integration"
         )
         if claude_integration:
-            existing = await claude_integration._find_resumable_session(
-                user_id, current_dir
-            )
-            if existing:
+            resumable_id = claude_integration._find_resumable_session_id(current_dir)
+            if resumable_id:
                 resumable_info = (
-                    f"🔄 Resumable: <code>{existing.session_id[:8]}...</code> "
-                    f"({existing.message_count} msgs)"
+                    f"🔄 Resumable: <code>{resumable_id[:8]}...</code>"
                 )
 
     # Format status message

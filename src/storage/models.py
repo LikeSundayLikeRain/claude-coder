@@ -6,7 +6,7 @@ Using dataclasses for simplicity and type safety.
 import json
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import aiosqlite
 
@@ -38,6 +38,7 @@ class UserModel:
     total_cost: float = 0.0
     message_count: int = 0
     session_count: int = 0
+    current_directory: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -58,49 +59,6 @@ class UserModel:
             data[field] = _parse_datetime(data.get(field))
 
         return cls(**data)
-
-
-@dataclass
-class SessionModel:
-    """Session data model."""
-
-    session_id: str
-    user_id: int
-    project_path: str
-    created_at: datetime
-    last_used: datetime
-    total_cost: float = 0.0
-    total_turns: int = 0
-    message_count: int = 0
-    is_active: bool = True
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
-        data = asdict(self)
-        # Convert datetime to ISO format
-        for key in ["created_at", "last_used"]:
-            if data[key]:
-                data[key] = data[key].isoformat()
-        return data
-
-    @classmethod
-    def from_row(cls, row: aiosqlite.Row) -> "SessionModel":
-        """Create from database row."""
-        data = dict(row)
-
-        # Parse datetime fields
-        for field in ["created_at", "last_used"]:
-            data[field] = _parse_datetime(data.get(field))
-
-        return cls(**data)
-
-    def is_expired(self, timeout_hours: int) -> bool:
-        """Check if session has expired."""
-        if not self.last_used:
-            return True
-
-        age = datetime.now(UTC) - self.last_used
-        return age.total_seconds() > (timeout_hours * 3600)
 
 
 @dataclass
@@ -134,81 +92,6 @@ class ProjectThreadModel:
             if val and isinstance(val, str):
                 data[field] = datetime.fromisoformat(val)
         data["is_active"] = bool(data.get("is_active", True))
-
-        return cls(**data)
-
-
-@dataclass
-class MessageModel:
-    """Message data model."""
-
-    session_id: str
-    user_id: int
-    timestamp: datetime
-    prompt: str
-    message_id: Optional[int] = None
-    response: Optional[str] = None
-    cost: float = 0.0
-    duration_ms: Optional[int] = None
-    error: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
-        data = asdict(self)
-        # Convert datetime to ISO format
-        if data["timestamp"]:
-            data["timestamp"] = data["timestamp"].isoformat()
-        return data
-
-    @classmethod
-    def from_row(cls, row: aiosqlite.Row) -> "MessageModel":
-        """Create from database row."""
-        data = dict(row)
-
-        # Parse datetime fields
-        data["timestamp"] = _parse_datetime(data.get("timestamp"))
-
-        return cls(**data)
-
-
-@dataclass
-class ToolUsageModel:
-    """Tool usage data model."""
-
-    session_id: str
-    tool_name: str
-    timestamp: datetime
-    id: Optional[int] = None
-    message_id: Optional[int] = None
-    tool_input: Optional[Dict[str, Any]] = None
-    success: bool = True
-    error_message: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
-        data = asdict(self)
-        # Convert datetime to ISO format
-        if data["timestamp"]:
-            data["timestamp"] = data["timestamp"].isoformat()
-        # Convert tool_input to JSON string if present
-        if data["tool_input"]:
-            data["tool_input"] = json.dumps(data["tool_input"])
-        return data
-
-    @classmethod
-    def from_row(cls, row: aiosqlite.Row) -> "ToolUsageModel":
-        """Create from database row."""
-        data = dict(row)
-
-        # Parse datetime fields
-        data["timestamp"] = _parse_datetime(data.get("timestamp"))
-
-        # Parse JSON fields
-        if data.get("tool_input"):
-            try:
-                data["tool_input"] = json.loads(data["tool_input"])
-            except (json.JSONDecodeError, TypeError):
-                data["tool_input"] = {}
 
         return cls(**data)
 
@@ -255,59 +138,105 @@ class AuditLogModel:
 
 
 @dataclass
-class CostTrackingModel:
-    """Cost tracking data model."""
+class WebhookEventModel:
+    """Webhook event data model."""
 
-    user_id: int
-    date: str  # ISO date format (YYYY-MM-DD)
-    daily_cost: float = 0.0
-    request_count: int = 0
+    event_id: str
+    provider: str
+    event_type: str
     id: Optional[int] = None
-
-    @classmethod
-    def from_row(cls, row: aiosqlite.Row) -> "CostTrackingModel":
-        """Create from database row."""
-        return cls(**dict(row))
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
-        return asdict(self)
-
-
-@dataclass
-class UserTokenModel:
-    """User token data model."""
-
-    user_id: int
-    token_hash: str
-    created_at: datetime
-    token_id: Optional[int] = None
-    expires_at: Optional[datetime] = None
-    last_used: Optional[datetime] = None
-    is_active: bool = True
+    delivery_id: Optional[str] = None
+    payload: Optional[Dict[str, Any]] = None
+    processed: bool = False
+    received_at: Optional[datetime] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         data = asdict(self)
-        # Convert datetime to ISO format
-        for key in ["created_at", "expires_at", "last_used"]:
-            if data[key]:
+        if data.get("received_at"):
+            data["received_at"] = data["received_at"].isoformat()
+        if data.get("payload"):
+            data["payload"] = json.dumps(data["payload"])
+        return data
+
+    @classmethod
+    def from_row(cls, row: aiosqlite.Row) -> "WebhookEventModel":
+        """Create from database row."""
+        data = dict(row)
+        data["received_at"] = _parse_datetime(data.get("received_at"))
+        if data.get("payload"):
+            try:
+                data["payload"] = json.loads(data["payload"])
+            except (json.JSONDecodeError, TypeError):
+                data["payload"] = {}
+        return cls(**data)
+
+
+@dataclass
+class ScheduledJobModel:
+    """Scheduled job data model."""
+
+    job_id: str
+    job_name: str
+    cron_expression: str
+    prompt: str
+    working_directory: str
+    target_chat_ids: str = ""
+    skill_name: Optional[str] = None
+    created_by: int = 0
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        data = asdict(self)
+        for key in ["created_at", "updated_at"]:
+            if data.get(key):
                 data[key] = data[key].isoformat()
         return data
 
     @classmethod
-    def from_row(cls, row: aiosqlite.Row) -> "UserTokenModel":
+    def from_row(cls, row: aiosqlite.Row) -> "ScheduledJobModel":
+        """Create from database row."""
+        data = dict(row)
+        for field in ["created_at", "updated_at"]:
+            data[field] = _parse_datetime(data.get(field))
+        return cls(**data)
+
+
+@dataclass
+class BotSessionModel:
+    """Persisted bot session state for restart recovery."""
+
+    user_id: int
+    session_id: str
+    directory: str
+    model: Optional[str]
+    betas: Optional[List[str]]
+    last_active: datetime
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for storage."""
+        data = asdict(self)
+        betas = data["betas"]
+        data["betas"] = json.dumps(betas) if betas is not None else None
+        data["last_active"] = data["last_active"].isoformat()
+        return data
+
+    @classmethod
+    def from_row(cls, row: Any) -> "BotSessionModel":
         """Create from database row."""
         data = dict(row)
 
-        # Parse datetime fields
-        for field in ["created_at", "expires_at", "last_used"]:
-            data[field] = _parse_datetime(data.get(field))
+        # Parse betas from JSON string
+        if data.get("betas") is not None:
+            try:
+                data["betas"] = json.loads(data["betas"])
+            except (json.JSONDecodeError, TypeError):
+                data["betas"] = None
+
+        # Parse last_active from ISO string if needed
+        data["last_active"] = _parse_datetime(data["last_active"])
 
         return cls(**data)
-
-    def is_expired(self) -> bool:
-        """Check if token has expired."""
-        if not self.expires_at:
-            return False
-        return datetime.now(UTC) > self.expires_at

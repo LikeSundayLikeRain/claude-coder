@@ -45,20 +45,31 @@ class TestDatabaseManager:
             )
             tables = [row[0] for row in await cursor.fetchall()]
 
+            # Tables that should exist after all migrations (including migration 7 drops)
             expected_tables = [
                 "users",
-                "sessions",
-                "messages",
-                "tool_usage",
                 "audit_log",
-                "user_tokens",
-                "cost_tracking",
                 "project_threads",
                 "schema_version",
+                "scheduled_jobs",
+                "webhook_events",
+                "bot_sessions",
             ]
 
             for table in expected_tables:
-                assert table in tables
+                assert table in tables, f"Expected table '{table}' not found"
+
+            # Tables that should have been dropped by migrations 7/8
+            dropped_tables = [
+                "messages",
+                "tool_usage",
+                "cost_tracking",
+                "user_tokens",
+                "sessions",
+            ]
+
+            for table in dropped_tables:
+                assert table not in tables, f"Table '{table}' should have been dropped"
 
     async def test_foreign_keys_enabled(self, db_manager):
         """Test that foreign keys are enabled."""
@@ -76,24 +87,31 @@ class TestDatabaseManager:
             )
             indexes = [row[0] for row in await cursor.fetchall()]
 
+            # Indexes that should still exist
             expected_indexes = [
-                "idx_sessions_user_id",
-                "idx_sessions_project_path",
-                "idx_messages_session_id",
-                "idx_messages_timestamp",
                 "idx_audit_log_user_id",
                 "idx_audit_log_timestamp",
-                "idx_cost_tracking_user_date",
                 "idx_project_threads_chat_active",
                 "idx_project_threads_slug",
             ]
 
             for index in expected_indexes:
-                assert index in indexes
+                assert index in indexes, f"Expected index '{index}' not found"
 
     async def test_migration_tracking(self, db_manager):
         """Test that migrations are tracked."""
         async with db_manager.get_connection() as conn:
             cursor = await conn.execute("SELECT MAX(version) FROM schema_version")
             version = await cursor.fetchone()
-            assert version[0] >= 1  # At least initial migration
+            assert version[0] == 9  # Should be at migration 9
+
+    async def test_views_dropped(self, db_manager):
+        """Test that analytics views were dropped by migration 7."""
+        async with db_manager.get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='view'"
+            )
+            views = [row[0] for row in await cursor.fetchall()]
+
+            assert "daily_stats" not in views
+            assert "user_stats" not in views

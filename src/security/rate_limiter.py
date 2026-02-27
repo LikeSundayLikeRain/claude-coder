@@ -51,7 +51,7 @@ class RateLimitBucket:
             return 0.0
 
         tokens_needed = tokens - self.tokens
-        return tokens_needed / self.refill_rate
+        return (tokens_needed / self.refill_rate) if self.refill_rate > 0 else 0.0
 
     def get_status(self) -> Dict[str, float]:
         """Get current bucket status."""
@@ -59,7 +59,7 @@ class RateLimitBucket:
         return {
             "capacity": self.capacity,
             "tokens": self.tokens,
-            "utilization": (self.capacity - self.tokens) / self.capacity,
+            "utilization": ((self.capacity - self.tokens) / self.capacity) if self.capacity > 0 else 0.0,
             "refill_rate": self.refill_rate,
         }
 
@@ -74,9 +74,11 @@ class RateLimiter:
         self.cost_reset_time: Dict[int, datetime] = {}
         self.locks: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-        # Calculate refill rate from config
+        # Calculate refill rate from config (0 when rate limiting disabled)
         self.refill_rate = (
-            self.config.rate_limit_requests / self.config.rate_limit_window
+            (self.config.rate_limit_requests / self.config.rate_limit_window)
+            if self.config.rate_limit_requests > 0
+            else 0.0
         )
 
         logger.info(
@@ -91,7 +93,14 @@ class RateLimiter:
     async def check_rate_limit(
         self, user_id: int, cost: float = 1.0, tokens: int = 1
     ) -> Tuple[bool, Optional[str]]:
-        """Check if request is allowed under rate limits."""
+        """Check if request is allowed under rate limits.
+
+        When rate_limit_requests is 0, all rate checks are bypassed.
+        """
+        # Skip all rate limiting when disabled (0 = unlimited)
+        if self.config.rate_limit_requests <= 0:
+            return True, None
+
         async with self.locks[user_id]:
             # Check request rate limit
             rate_allowed, rate_message = self._check_request_rate(user_id, tokens)
@@ -145,7 +154,10 @@ class RateLimiter:
     def _check_cost_limit(
         self, user_id: int, cost: float
     ) -> Tuple[bool, Optional[str]]:
-        """Check cost-based limit."""
+        """Check cost-based limit. 0 = unlimited."""
+        if self.config.claude_max_cost_per_user <= 0:
+            return True, None
+
         # Reset cost tracker if enough time has passed
         self._maybe_reset_cost_tracker(user_id)
 
@@ -236,15 +248,16 @@ class RateLimiter:
         # Get cost status
         self._maybe_reset_cost_tracker(user_id)
         current_cost = self.cost_tracker[user_id]
-        cost_remaining = max(0, self.config.claude_max_cost_per_user - current_cost)
+        max_cost = self.config.claude_max_cost_per_user
+        cost_remaining = max(0, max_cost - current_cost) if max_cost > 0 else float("inf")
 
         return {
             "request_bucket": bucket_status,
             "cost_usage": {
                 "current": current_cost,
-                "limit": self.config.claude_max_cost_per_user,
+                "limit": max_cost if max_cost > 0 else "unlimited",
                 "remaining": cost_remaining,
-                "utilization": current_cost / self.config.claude_max_cost_per_user,
+                "utilization": (current_cost / max_cost) if max_cost > 0 else 0.0,
             },
             "last_reset": self.cost_reset_time.get(
                 user_id, datetime.now(UTC)
