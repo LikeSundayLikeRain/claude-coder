@@ -33,8 +33,14 @@ from ..claude.history import (
 )
 from ..config.settings import Settings
 from ..projects import PrivateTopicsUnavailableError
-from ..skills.loader import discover_skills, load_skill_body, resolve_skill_prompt
 from .utils.html_format import escape_html
+from .utils.repo_browser import (
+    build_browse_header,
+    build_browser_keyboard,
+    is_branch_dir,
+    list_visible_children,
+    resolve_browse_path,
+)
 
 logger = structlog.get_logger()
 
@@ -349,7 +355,7 @@ class MessageOrchestrator:
         app.add_handler(
             CallbackQueryHandler(
                 self._inject_deps(self._agentic_callback),
-                pattern=r"^(cd:|session:|skill:|model:)",
+                pattern=r"^(cd:|nav:|sel:|session:|skill:|model:)",
             )
         )
 
@@ -1057,12 +1063,11 @@ class MessageOrchestrator:
         )
 
         # Check if this is a skill invocation (e.g., "/skillname args")
-        # Skip if it's a registered bot command
+        # Skip if it's a registered bot command — pass verbatim to CLI
         if message_text.startswith("/"):
             parts = message_text[1:].split(None, 1)
             if parts:
                 potential_skill_name = parts[0]
-                skill_args = parts[1] if len(parts) > 1 else ""
 
                 # List of registered bot commands to skip
                 registered_commands = {
@@ -1080,70 +1085,31 @@ class MessageOrchestrator:
                 }
 
                 if potential_skill_name not in registered_commands:
-                    # Try to find this skill
-                    current_dir = context.user_data.get(
-                        "current_directory", self.settings.approved_directories[0]
+                    # Check cached commands from SDK — if found, log and
+                    # pass verbatim. The CLI handles body loading, placeholder
+                    # resolution, and prompt injection natively.
+                    _cm_check: Optional[ClientManager] = context.bot_data.get(
+                        "client_manager"
                     )
-                    skills = discover_skills(project_dir=Path(current_dir))
-                    # Match exact name, then unprefixed exact, then prefix match.
-                    # e.g., "brainstorm" matches "superpowers:brainstorming"
-                    skill = next(
-                        (s for s in skills if s.name == potential_skill_name),
-                        None,
+                    _active = (
+                        _cm_check.get_active_client(user_id) if _cm_check else None
                     )
-                    if skill is None:
-                        # Try unprefixed exact match
-                        skill = next(
-                            (
-                                s
-                                for s in skills
-                                if ":" in s.name
-                                and s.name.split(":", 1)[1] == potential_skill_name
-                            ),
-                            None,
+                    if _active and _active.has_command(potential_skill_name):
+                        logger.info(
+                            "skill_passthrough",
+                            skill_name=potential_skill_name,
+                            user_id=user_id,
                         )
-                    if skill is None:
-                        # Try prefix match on unprefixed part
-                        skill = next(
-                            (
-                                s
-                                for s in skills
-                                if ":" in s.name
-                                and s.name.split(":", 1)[1].startswith(
-                                    potential_skill_name
-                                )
-                            ),
-                            None,
+                    elif _active:
+                        # Command not found in cache — show error
+                        await update.message.reply_text(
+                            f"❌ Skill <code>{escape_html(potential_skill_name)}</code> "
+                            f"not found. Use /commands to see available skills.",
+                            parse_mode="HTML",
                         )
-
-                    if skill:
-                        # This is a skill invocation — load and resolve it
-                        body = load_skill_body(skill)
-                        if body:
-                            session_id = context.user_data.get("claude_session_id") or ""
-                            resolved = resolve_skill_prompt(
-                                body, skill_args, session_id
-                            )
-                            # Frame the skill body as instructions, not a
-                            # user question — mirrors how the CLI's Skill
-                            # tool presents skills to Claude.
-                            args_line = (
-                                f"\nUser arguments: {skill_args}" if skill_args else ""
-                            )
-                            message_text = (
-                                f"<skill-invocation>\n"
-                                f"The user has invoked the /{skill.name} "
-                                f"skill. Follow the instructions in the "
-                                f"skill body below exactly as written."
-                                f"{args_line}\n"
-                                f"</skill-invocation>\n\n"
-                                f"<skill-body>\n{resolved}\n</skill-body>"
-                            )
-                            logger.info(
-                                "Skill invocation detected",
-                                skill_name=skill.name,
-                                user_id=user_id,
-                            )
+                        return
+                    # If no active client, fall through to normal text handling
+                    # (will trigger a connect, and CLI will handle the /command)
 
         # Sync from active client (e.g. after API-driven /resume)
         _cm: Optional[ClientManager] = context.bot_data.get("client_manager")
@@ -1524,42 +1490,27 @@ class MessageOrchestrator:
     async def agentic_repo(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """List repos in workspace or switch to one.
+        """Navigable directory browser.
 
-        /repo          — list all workspace roots and their subdirectories
-        /repo <name>   — switch to that directory, resume session if available
+        /repo          — browse current directory (or workspace root)
+        /repo <path>   — navigate to path (multi-level supported)
         """
         args = update.message.text.split()[1:] if update.message.text else []
         roots = self.settings.approved_directories
         storage = context.bot_data.get("storage")
 
-        # Get current directory
-        current_dir = context.user_data.get("current_directory")
-        if not current_dir and storage:
-            # Try to restore from database
-            persisted = await storage.load_user_directory(update.effective_user.id)
-            if persisted:
-                current_dir = Path(persisted)
-                context.user_data["current_directory"] = current_dir
+        # Determine current browse location
+        browse_root = context.user_data.get("repo_browse_root")
+        browse_rel = context.user_data.get("repo_browse_rel", "")
+
+        if not browse_root or browse_root not in roots:
+            browse_root = roots[0]
+            browse_rel = ""
 
         if args:
-            # Switch to named repo - search across all roots
-            target_name = args[0]
-            target_path = None
-
-            # Try each root
-            for root in roots:
-                candidate = root / target_name
-                if candidate.is_dir():
-                    target_path = candidate
-                    break
-                # Also check if target_name is an absolute path within roots
-                candidate_abs = Path(target_name).resolve()
-                if candidate_abs.is_dir() and any(
-                    candidate_abs == r or candidate_abs.is_relative_to(r) for r in roots
-                ):
-                    target_path = candidate_abs
-                    break
+            # /repo <path> — resolve multi-level path
+            target_name = " ".join(args)
+            target_path = resolve_browse_path(target_name, roots)
 
             if not target_path:
                 await update.message.reply_text(
@@ -1568,230 +1519,182 @@ class MessageOrchestrator:
                 )
                 return
 
-            context.user_data["current_directory"] = target_path
-
-            # Persist to database
-            if storage:
-                await storage.save_user_directory(
-                    update.effective_user.id, str(target_path)
-                )
-
-            # Try to find a resumable session from history.jsonl
-            session_id = None
-            client_manager_repo: Optional[ClientManager] = context.bot_data.get(
-                "client_manager"
+            # Find which root this path is under
+            target_root = next(
+                (r for r in roots if target_path == r or target_path.is_relative_to(r)),
+                None,
             )
-            if client_manager_repo:
-                session_id = client_manager_repo.get_latest_session(str(target_path))
+            if not target_root:
+                await update.message.reply_text(
+                    f"Directory not found: <code>{escape_html(target_name)}</code>",
+                    parse_mode="HTML",
+                )
+                return
+
+            if is_branch_dir(target_path):
+                # Navigate into it — show browser
+                context.user_data["repo_browse_root"] = target_root
+                context.user_data["repo_browse_rel"] = (
+                    str(target_path.relative_to(target_root))
+                    if target_path != target_root
+                    else ""
+                )
+                await self._send_repo_browser(
+                    update.message, target_path, target_root, roots, context
+                )
             else:
-                # Legacy fallback: only reachable in classic mode or tests
-                # without a ClientManager. Agentic mode always has one.
-                claude_integration = context.bot_data.get("claude_integration")
-                if claude_integration:
-                    session_id = claude_integration._find_resumable_session_id(
-                        target_path
-                    )
-            context.user_data["claude_session_id"] = session_id
-
-            is_git = (target_path / ".git").is_dir()
-            git_badge = " (git)" if is_git else ""
-            session_badge = " · session resumed" if session_id else ""
-
-            await update.message.reply_text(
-                f"Switched to <code>{escape_html(target_path.name)}/</code>"
-                f"{git_badge}{session_badge}",
-                parse_mode="HTML",
-            )
+                # Leaf — select it
+                await self._select_directory(
+                    update.message,
+                    target_path,
+                    storage,
+                    context,
+                    user_id=update.effective_user.id,
+                )
             return
 
-        # No args — list all workspace roots and their subdirectories
-        lines: List[str] = []
-        keyboard_rows: List[list] = []  # type: ignore[type-arg]
+        # No args — show browser at current browse location
+        browse_dir = browse_root / browse_rel if browse_rel else browse_root
+        if not browse_dir.is_dir():
+            browse_dir = browse_root
+            browse_rel = ""
+            context.user_data["repo_browse_rel"] = ""
 
-        # First, add workspace root buttons if multiple roots
-        if len(roots) > 1:
-            lines.append("<b>📁 Workspaces</b>")
-            root_row = []
-            for root in roots:
-                root_name = root.name
-                marker = " \u25c0" if current_dir == root else ""
-                lines.append(f"  <code>{escape_html(root_name)}/</code>{marker}")
-                root_row.append(
-                    InlineKeyboardButton(root_name, callback_data=f"cd:{str(root)}")
-                )
-                if len(root_row) == 2:
-                    keyboard_rows.append(root_row)
-                    root_row = []
-            if root_row:
-                keyboard_rows.append(root_row)
-            lines.append("")  # Blank line separator
-
-        # List subdirectories for each root
-        for root in roots:
-            try:
-                entries = sorted(
-                    [
-                        d
-                        for d in root.iterdir()
-                        if d.is_dir() and not d.name.startswith(".")
-                    ],
-                    key=lambda d: d.name,
-                )
-            except OSError as e:
-                logger.warning(
-                    "Error reading workspace root", root=str(root), error=str(e)
-                )
-                continue
-
-            if not entries:
-                continue
-
-            # Section header for this root (only if multiple roots)
-            if len(roots) > 1:
-                lines.append(f"<b>📂 {escape_html(root.name)}/</b>")
-
-            for d in entries:
-                is_git = (d / ".git").is_dir()
-                icon = "\U0001f4e6" if is_git else "\U0001f4c1"
-                marker = " \u25c0" if d == current_dir else ""
-                rel_name = d.name if len(roots) == 1 else f"{root.name}/{d.name}"
-                lines.append(f"{icon} <code>{escape_html(d.name)}/</code>{marker}")
-
-            # Build inline keyboard (2 per row)
-            for i in range(0, len(entries), 2):
-                row = []
-                for j in range(2):
-                    if i + j < len(entries):
-                        d = entries[i + j]
-                        name = d.name
-                        row.append(
-                            InlineKeyboardButton(name, callback_data=f"cd:{str(d)}")
-                        )
-                keyboard_rows.append(row)
-
-            if len(roots) > 1:
-                lines.append("")  # Blank line between roots
-
-        if not lines:
-            workspaces_list = "\n".join(
-                f"  • <code>{escape_html(str(r))}</code>" for r in roots
-            )
-            await update.message.reply_text(
-                f"No repos in workspaces:\n{workspaces_list}\n\n"
-                'Clone one by telling me, e.g. <i>"clone org/repo"</i>.',
-                parse_mode="HTML",
-            )
-            return
-
-        reply_markup = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
-
-        header = "<b>Repos</b>\n\n" if len(roots) == 1 else ""
-        await update.message.reply_text(
-            header + "\n".join(lines),
-            parse_mode="HTML",
-            reply_markup=reply_markup,
+        await self._send_repo_browser(
+            update.message, browse_dir, browse_root, roots, context
         )
+
+    async def _send_repo_browser(
+        self,
+        message: Any,
+        browse_dir: Path,
+        workspace_root: Path,
+        roots: list,
+        context: ContextTypes.DEFAULT_TYPE,
+        edit: bool = False,
+    ) -> None:
+        """Render the directory browser for browse_dir."""
+        header = build_browse_header(browse_dir, workspace_root)
+        children = list_visible_children(browse_dir)
+
+        # Build file listing text
+        lines = [header, ""]
+        for child in children:
+            is_git = (child / ".git").is_dir()
+            icon = "\U0001f4e6" if is_git else "\U0001f4c1"
+            branch_marker = " \u25b6" if is_branch_dir(child) else ""
+            lines.append(
+                f"{icon} <code>{escape_html(child.name)}/</code>{branch_marker}"
+            )
+
+        if not children:
+            lines.append("<i>No subdirectories</i>")
+
+        keyboard = build_browser_keyboard(
+            browse_dir=browse_dir,
+            workspace_root=workspace_root,
+            multi_root=len(roots) > 1,
+        )
+        markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+        text = "\n".join(lines)
+
+        if edit:
+            await message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _select_directory(
+        self,
+        message: Any,
+        target_path: Path,
+        storage: Any,
+        context: ContextTypes.DEFAULT_TYPE,
+        edit: bool = False,
+        user_id: Optional[int] = None,
+    ) -> None:
+        """Select a directory: set as working dir, resume session."""
+        context.user_data["current_directory"] = target_path
+
+        if storage and user_id:
+            await storage.save_user_directory(user_id, str(target_path))
+
+        # Look for resumable session
+        session_id = None
+        client_manager = context.bot_data.get("client_manager")
+        if client_manager:
+            session_id = client_manager.get_latest_session(str(target_path))
+        else:
+            claude_integration = context.bot_data.get("claude_integration")
+            if claude_integration:
+                session_id = claude_integration._find_resumable_session_id(target_path)
+        context.user_data["claude_session_id"] = session_id
+
+        is_git = (target_path / ".git").is_dir()
+        git_badge = " (git)" if is_git else ""
+        session_badge = " · session resumed" if session_id else ""
+
+        text = (
+            f"Switched to <code>{escape_html(target_path.name)}/</code>"
+            f"{git_badge}{session_badge}"
+        )
+
+        if edit:
+            await message.edit_text(text, parse_mode="HTML")
+        else:
+            await message.reply_text(text, parse_mode="HTML")
 
     async def agentic_commands(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show available skills as inline keyboard buttons."""
-        current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directories[0]
-        )
+        user_id = update.effective_user.id
+        client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
 
-        # Discover skills
-        skills = discover_skills(project_dir=Path(current_dir))
+        commands: list[dict] = []
+        if client_manager:
+            commands = client_manager.get_available_commands(user_id)
 
-        if not skills:
+        if not commands:
             await update.message.reply_text(
-                "📝 <b>No Skills Found</b>\n\n"
-                "Create skills in:\n"
+                "📝 <b>No Skills Available</b>\n\n"
+                "Start a session first (send any message), "
+                "then use /commands to see available skills.\n\n"
+                "Skills are loaded from:\n"
                 "  • <code>.claude/skills/&lt;name&gt;/SKILL.md</code> (project)\n"
-                "  • <code>~/.claude/skills/&lt;name&gt;/SKILL.md</code> (personal)\n\n"
-                "Or install plugins via Claude Code CLI.\n\n"
-                "Legacy commands also supported:\n"
-                "  • <code>.claude/commands/&lt;name&gt;.md</code>\n"
-                "  • <code>~/.claude/commands/&lt;name&gt;.md</code>",
+                "  • <code>~/.claude/skills/&lt;name&gt;/SKILL.md</code> (personal)\n"
+                "  • Installed plugins",
                 parse_mode="HTML",
             )
             return
 
-        # Group by source
-        project_skills = [
-            s for s in skills if s.source in ("project", "legacy_project")
-        ]
-        personal_skills = [
-            s for s in skills if s.source in ("personal", "legacy_personal")
-        ]
-        plugin_skills = [s for s in skills if s.source == "plugin"]
-
-        # Helper to build a button for a skill
-        def _skill_button(skill: Any) -> InlineKeyboardButton:
-            if skill.argument_hint:
+        # Build inline keyboard
+        def _cmd_button(cmd: dict) -> InlineKeyboardButton:
+            name = cmd["name"]
+            hint = cmd.get("argumentHint", "")
+            if hint:
                 return InlineKeyboardButton(
-                    f"{skill.name} ...",
-                    switch_inline_query_current_chat=f"/{skill.name} ",
+                    f"{name} ...",
+                    switch_inline_query_current_chat=f"/{name} ",
                 )
-            return InlineKeyboardButton(skill.name, callback_data=f"skill:{skill.name}")
+            return InlineKeyboardButton(name, callback_data=f"skill:{name}")
 
-        # Build inline keyboard — project/personal get one per row,
-        # plugin skills get two per row for compactness
-        keyboard_rows: List[list] = []  # type: ignore[type-arg]
+        keyboard_rows = [[_cmd_button(cmd)] for cmd in commands]
 
-        for group in (project_skills, personal_skills):
-            for skill in group:
-                keyboard_rows.append([_skill_button(skill)])
-
-        # Plugin skills: 2 per row
-        plugin_row: list = []  # type: ignore[type-arg]
-        for skill in plugin_skills:
-            plugin_row.append(_skill_button(skill))
-            if len(plugin_row) == 2:
-                keyboard_rows.append(plugin_row)
-                plugin_row = []
-        if plugin_row:
-            keyboard_rows.append(plugin_row)
+        # Truncate to fit Telegram limits
+        if len(keyboard_rows) > 100:
+            keyboard_rows = keyboard_rows[:100]
 
         reply_markup = InlineKeyboardMarkup(keyboard_rows)
 
-        # Build message text — project/personal get descriptions,
-        # plugin skills are name-only grouped by plugin for compactness
+        # Build message text
         lines: List[str] = ["<b>Available Skills</b>\n"]
+        for cmd in commands:
+            desc = cmd.get("description", "")
+            line = f"  \u2022 <code>{escape_html(cmd['name'])}</code>"
+            if desc:
+                line += f" \u2014 {escape_html(desc[:80])}"
+            lines.append(line)
 
-        for label, group in [
-            ("\U0001f4c2 Project", project_skills),
-            ("\U0001f464 Personal", personal_skills),
-        ]:
-            if not group:
-                continue
-            lines.append(f"<b>{label}</b>")
-            for skill in group:
-                desc_line = f"  \u2022 <code>{skill.name}</code>"
-                if skill.description:
-                    desc_line += f" \u2014 {escape_html(skill.description[:80])}"
-                if skill.argument_hint:
-                    desc_line += f" <i>({escape_html(skill.argument_hint)})</i>"
-                lines.append(desc_line)
-            lines.append("")
-
-        # Plugin skills: group by plugin name, names only
-        if plugin_skills:
-            # Group by plugin prefix (e.g., "superpowers" from "superpowers:brainstorming")
-            plugin_groups: Dict[str, List[str]] = {}
-            for skill in plugin_skills:
-                if ":" in skill.name:
-                    prefix, short_name = skill.name.split(":", 1)
-                else:
-                    prefix, short_name = "other", skill.name
-                plugin_groups.setdefault(prefix, []).append(short_name)
-
-            lines.append("\U0001f4e6 <b>Plugin Skills</b>")
-            for plugin_name, skill_names in sorted(plugin_groups.items()):
-                names_str = ", ".join(f"<code>{n}</code>" for n in sorted(skill_names))
-                lines.append(f"  <b>{escape_html(plugin_name)}</b>: {names_str}")
-
-        # Telegram message limit is 4096 chars — truncate if needed
         message = "\n".join(lines)
         if len(message) > 4000:
             message = message[:3950] + "\n\n<i>... truncated</i>"
@@ -1965,9 +1868,7 @@ class MessageOrchestrator:
                     if len(msg.text) > 120:
                         preview += "\u2026"
                     label = "You" if msg.role == "user" else "Claude"
-                    lines.append(
-                        f"  <b>{label}:</b> {escape_html(preview)}"
-                    )
+                    lines.append(f"  <b>{label}:</b> {escape_html(preview)}")
         except Exception:
             logger.debug("transcript_preview_failed", session_id=session_id)
 
@@ -2010,28 +1911,8 @@ class MessageOrchestrator:
                 "current_directory", self.settings.approved_directories[0]
             )
 
-            # Discover and find the skill
-            skills = discover_skills(project_dir=Path(current_dir))
-            skill = next((s for s in skills if s.name == skill_name), None)
-
-            if not skill:
-                await query.edit_message_text(
-                    f"❌ Skill not found: <code>{escape_html(skill_name)}</code>",
-                    parse_mode="HTML",
-                )
-                return
-
-            # Load and resolve skill body
-            body = load_skill_body(skill)
-            if not body:
-                await query.edit_message_text(
-                    f"❌ Failed to load skill: <code>{escape_html(skill_name)}</code>",
-                    parse_mode="HTML",
-                )
-                return
-
-            session_id = context.user_data.get("claude_session_id") or ""
-            prompt = resolve_skill_prompt(body, "", session_id)
+            prompt = f"/{skill_name}"
+            session_id = context.user_data.get("claude_session_id")
 
             # Show running message
             await query.edit_message_text(
@@ -2143,6 +2024,97 @@ class MessageOrchestrator:
                     command="skill",
                     args=[skill_name],
                     success=success,
+                )
+            return
+
+        # Handle nav: callbacks (browse into directory)
+        if prefix == "nav":
+            roots = self.settings.approved_directories
+            browse_root = context.user_data.get("repo_browse_root", roots[0])
+            if browse_root not in roots:
+                browse_root = roots[0]
+                context.user_data["repo_browse_root"] = browse_root
+            browse_rel = context.user_data.get("repo_browse_rel", "")
+
+            if value == "..":
+                # Go up one level
+                if browse_rel:
+                    parent_rel = str(Path(browse_rel).parent)
+                    new_rel = "" if parent_rel == "." else parent_rel
+                else:
+                    # At root — stay at root
+                    new_rel = ""
+
+                context.user_data["repo_browse_rel"] = new_rel
+            else:
+                # Navigate into directory
+                browse_dir = (browse_root / value).resolve()
+                if not browse_dir.is_dir() or not browse_dir.is_relative_to(
+                    browse_root
+                ):
+                    await query.edit_message_text(
+                        f"Directory not found: <code>{escape_html(value)}</code>",
+                        parse_mode="HTML",
+                    )
+                    return
+                context.user_data["repo_browse_rel"] = str(
+                    browse_dir.relative_to(browse_root)
+                )
+                context.user_data["repo_browse_root"] = browse_root
+
+            browse_rel = context.user_data["repo_browse_rel"]
+            browse_dir = browse_root / browse_rel if browse_rel else browse_root
+            await self._send_repo_browser(
+                query.message, browse_dir, browse_root, roots, context, edit=True
+            )
+            return
+
+        # Handle sel: callbacks (select directory)
+        if prefix == "sel":
+            roots = self.settings.approved_directories
+            browse_root = context.user_data.get("repo_browse_root", roots[0])
+            if browse_root not in roots:
+                browse_root = roots[0]
+                context.user_data["repo_browse_root"] = browse_root
+            browse_rel = context.user_data.get("repo_browse_rel", "")
+            storage = context.bot_data.get("storage")
+
+            if value == ".":
+                target_path = browse_root / browse_rel if browse_rel else browse_root
+            else:
+                target_path = (browse_root / value).resolve()
+
+            if not target_path.is_dir():
+                await query.edit_message_text(
+                    f"Directory not found: <code>{escape_html(value)}</code>",
+                    parse_mode="HTML",
+                )
+                return
+
+            # Validate security boundary
+            if not any(
+                target_path == r or target_path.is_relative_to(r) for r in roots
+            ):
+                await query.edit_message_text("Access denied.", parse_mode="HTML")
+                return
+
+            await self._select_directory(
+                query.message,
+                target_path,
+                storage,
+                context,
+                edit=True,
+                user_id=query.from_user.id,
+            )
+
+            # Audit log
+            audit_logger = context.bot_data.get("audit_logger")
+            if audit_logger:
+                await audit_logger.log_command(
+                    user_id=query.from_user.id,
+                    command="repo",
+                    args=[str(target_path)],
+                    success=True,
                 )
             return
 

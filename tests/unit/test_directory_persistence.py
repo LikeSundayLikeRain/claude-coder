@@ -151,21 +151,21 @@ class TestMultiRootDirectorySupport:
             orchestrator = MessageOrchestrator(settings, mock_deps)
             await orchestrator.agentic_repo(update, context)
 
-            # Should list workspace roots and their subdirectories
+            # New browser shows one root at a time (first root by default)
             update.message.reply_text.assert_called_once()
             call_args = update.message.reply_text.call_args
             message_text = call_args[0][0]
 
-            # Check for workspace section
-            assert "📁 Workspaces" in message_text
-            assert "workspace1" in message_text
-            assert "workspace2" in message_text
+            # Should show browsing header
+            assert "Browsing:" in message_text
 
-            # Check for subdirectories from both roots
+            # Should show subdirectories from the first root
             assert "project_a" in message_text
             assert "project_b" in message_text
-            assert "project_c" in message_text
-            assert "project_d" in message_text
+
+            # Should have inline keyboard with .. for multi-root navigation
+            reply_markup = call_args[1].get("reply_markup")
+            assert reply_markup is not None
         finally:
             if old_env is not None:
                 os.environ["APPROVED_DIRECTORIES"] = old_env
