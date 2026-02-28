@@ -72,6 +72,7 @@ class UserClient:
         self._options: Optional[ClaudeAgentOptions] = None
         self._connected_event: asyncio.Event = asyncio.Event()
         self._connect_error: Optional[Exception] = None
+        self._available_commands: list[dict[str, Any]] = []
 
     @property
     def is_connected(self) -> bool:
@@ -80,6 +81,15 @@ class UserClient:
     @property
     def is_querying(self) -> bool:
         return self._querying
+
+    @property
+    def available_commands(self) -> list[dict[str, Any]]:
+        """Cached commands from get_server_info()."""
+        return list(self._available_commands)
+
+    def has_command(self, name: str) -> bool:
+        """Check if a command name exists in the cached list."""
+        return any(cmd["name"] == name for cmd in self._available_commands)
 
     async def start(self, options: ClaudeAgentOptions) -> None:
         """Spawn the worker task and connect the SDK client."""
@@ -135,6 +145,18 @@ class UserClient:
         try:
             self._sdk_client = ClaudeSDKClient(self._options)
             await self._sdk_client.connect()
+            # Cache available commands from CLI
+            try:
+                server_info = await self._sdk_client.get_server_info()
+                if server_info and "commands" in server_info:
+                    self._available_commands = server_info["commands"]
+                    logger.info(
+                        "cached_available_commands",
+                        user_id=self.user_id,
+                        count=len(self._available_commands),
+                    )
+            except Exception as e:
+                logger.warning("failed_to_get_server_info", error=str(e))
             self._connected_event.set()
             logger.info(
                 "user_client_connected",
@@ -168,6 +190,7 @@ class UserClient:
                 except Exception as e:
                     logger.debug("disconnect_error", error=str(e))
                 self._sdk_client = None
+            self._available_commands = []
             self._running = False
             self._querying = False
             # Drain any pending work items so their futures don't hang forever

@@ -207,6 +207,13 @@ class ClientManager:
         """Return the active UserClient for a user, or None."""
         return self._clients.get(user_id)
 
+    def get_available_commands(self, user_id: int) -> list[dict]:
+        """Return cached commands for the user's active client, or []."""
+        client = self._clients.get(user_id)
+        if client is None:
+            return []
+        return client.available_commands
+
     async def disconnect(self, user_id: int) -> None:
         """Stop and remove user's client."""
         client = self._clients.pop(user_id, None)

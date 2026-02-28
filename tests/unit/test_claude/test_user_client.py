@@ -228,6 +228,64 @@ class TestWorkItem:
         assert item.on_stream is cb
 
 
+class TestUserClientSkillsCache:
+    """Test get_server_info() caching after connect."""
+
+    @pytest.mark.asyncio
+    async def test_available_commands_populated_after_start(self) -> None:
+        mock_sdk = AsyncMock()
+        mock_sdk.get_server_info = AsyncMock(return_value={
+            "commands": [
+                {"name": "brainstorm", "description": "Brainstorm ideas", "argumentHint": "<topic>"},
+                {"name": "commit", "description": "Commit changes", "argumentHint": ""},
+            ]
+        })
+        mock_options = MagicMock()
+
+        with patch("src.claude.user_client.ClaudeSDKClient", return_value=mock_sdk):
+            client = UserClient(user_id=1, directory="/dir")
+            await client.start(mock_options)
+            assert len(client.available_commands) == 2
+            assert client.available_commands[0]["name"] == "brainstorm"
+            await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_available_commands_empty_on_server_info_failure(self) -> None:
+        mock_sdk = AsyncMock()
+        mock_sdk.get_server_info = AsyncMock(return_value=None)
+        mock_options = MagicMock()
+
+        with patch("src.claude.user_client.ClaudeSDKClient", return_value=mock_sdk):
+            client = UserClient(user_id=1, directory="/dir")
+            await client.start(mock_options)
+            assert client.available_commands == []
+            await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_available_commands_cleared_after_stop(self) -> None:
+        mock_sdk = AsyncMock()
+        mock_sdk.get_server_info = AsyncMock(return_value={
+            "commands": [{"name": "test", "description": "", "argumentHint": ""}]
+        })
+        mock_options = MagicMock()
+
+        with patch("src.claude.user_client.ClaudeSDKClient", return_value=mock_sdk):
+            client = UserClient(user_id=1, directory="/dir")
+            await client.start(mock_options)
+            assert len(client.available_commands) == 1
+            await client.stop()
+            assert client.available_commands == []
+
+    def test_has_command_checks_cache(self) -> None:
+        client = UserClient(user_id=1, directory="/dir")
+        client._available_commands = [
+            {"name": "brainstorm", "description": "Ideas", "argumentHint": ""},
+            {"name": "commit", "description": "Commit", "argumentHint": ""},
+        ]
+        assert client.has_command("brainstorm") is True
+        assert client.has_command("nonexistent") is False
+
+
 class TestQueryResult:
     def test_query_result_creation(self) -> None:
         result = QueryResult(

@@ -373,3 +373,25 @@ class TestOnClientExit:
         manager = ClientManager(bot_session_repo=repo)
         # Should not raise
         manager._on_client_exit(999)
+
+
+class TestGetAvailableCommands:
+    """Test get_available_commands() delegates to active client."""
+
+    def test_returns_commands_from_active_client(self) -> None:
+        repo = _make_mock_bot_session_repo()
+        manager = ClientManager(bot_session_repo=repo)
+        mock_client = _make_mock_user_client()
+        mock_client.available_commands = [
+            {"name": "brainstorm", "description": "Ideas", "argumentHint": ""},
+        ]
+        manager._clients[1] = mock_client
+        result = manager.get_available_commands(user_id=1)
+        assert len(result) == 1
+        assert result[0]["name"] == "brainstorm"
+
+    def test_returns_empty_for_unknown_user(self) -> None:
+        repo = _make_mock_bot_session_repo()
+        manager = ClientManager(bot_session_repo=repo)
+        result = manager.get_available_commands(user_id=999)
+        assert result == []
