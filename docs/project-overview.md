@@ -23,8 +23,8 @@ A Telegram bot that provides remote access to Claude Code, allowing developers t
 
 ### Agentic Mode (Default)
 - Natural language conversation with Claude -- no commands needed
-- Minimal command set: `/start`, `/new`, `/status`
-- Automatic session persistence per user/project directory
+- Minimal command set: `/start`, `/new`, `/resume`, `/status`, `/repo`
+- CLI-aligned session lifecycle: `/repo` switches directories, `/new` starts fresh, `/resume` picks up a previous session
 - File and image upload support
 
 ### Classic Mode
@@ -42,7 +42,7 @@ A Telegram bot that provides remote access to Claude Code, allowing developers t
 
 ### Claude Code Integration
 - Full Claude Code SDK integration with actor-based client lifecycle
-- Session management per user/project with auto-resume
+- Session management per user/project with explicit resume via `/resume` command
 - Tool usage visibility with configurable verbose output
 
 ### Security & Access Control

@@ -10,7 +10,7 @@ A Telegram bot that gives you remote access to [Claude Code](https://claude.ai/c
 This bot connects Telegram to Claude Code, providing a conversational AI interface for your codebase:
 
 - **Chat naturally** -- ask Claude to analyze, edit, or explain your code in plain language
-- **Maintain context** across conversations with automatic session persistence per project
+- **Maintain context** across conversations -- `/resume` picks up where you left off, just like `claude --resume`
 - **Code on the go** from any device with Telegram
 - **Receive proactive notifications** from webhooks, scheduled jobs, and CI/CD events
 - **Stay secure** with built-in authentication, directory sandboxing, and audit logging
@@ -99,7 +99,7 @@ The bot supports two interaction modes:
 
 The default conversational mode. Just talk to Claude naturally -- no special commands required.
 
-**Commands:** `/start`, `/new`, `/status`, `/verbose`, `/repo`
+**Commands:** `/start`, `/new`, `/resume`, `/status`, `/verbose`, `/repo`
 If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`
 
 ```
@@ -152,7 +152,7 @@ You: Create a fix branch and push it
 Bot: [Claude creates branch, commits, pushes]
 ```
 
-Use `/repo` to list cloned repos in your workspace, or `/repo <name>` to switch directories (sessions auto-resume).
+Use `/repo` to browse and switch directories (like `cd`). Use `/new` to start a fresh session or `/resume` to pick up a previous one.
 
 ### Classic Mode
 

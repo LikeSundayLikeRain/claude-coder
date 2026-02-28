@@ -56,7 +56,7 @@ async def test_old_cd_callback_still_switches_directory(orchestrator, workspace)
     storage_mock = MagicMock()
     storage_mock.save_user_directory = AsyncMock()
     client_mgr = MagicMock()
-    client_mgr.get_latest_session = MagicMock(return_value="session-abc")
+    client_mgr.disconnect = AsyncMock()
 
     ctx = _make_context(
         user_data={},
@@ -70,11 +70,14 @@ async def test_old_cd_callback_still_switches_directory(orchestrator, workspace)
     await orchestrator._agentic_callback(update, ctx)
 
     assert ctx.user_data["current_directory"] == workspace / "projectB"
-    assert ctx.user_data["claude_session_id"] == "session-abc"
+    # Session should be cleared (no auto-resume)
+    assert ctx.user_data["claude_session_id"] is None
+    # Should disconnect active client
+    client_mgr.disconnect.assert_called_once_with(123)
     query.edit_message_text.assert_called_once()
     text = query.edit_message_text.call_args[0][0]
     assert "Switched to" in text
-    assert "session resumed" in text
+    assert "session resumed" not in text
 
 
 async def test_old_cd_callback_not_found(orchestrator, workspace):

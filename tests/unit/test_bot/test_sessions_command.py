@@ -1,4 +1,4 @@
-"""Tests for /sessions command and session callbacks."""
+"""Tests for /resume command (session picker) and session callbacks."""
 
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,7 +40,7 @@ def mock_update():
     update = MagicMock()
     update.effective_user.id = 123
     update.message.reply_text = AsyncMock()
-    update.message.text = "/sessions"
+    update.message.text = "/resume"
     return update
 
 
@@ -56,7 +56,7 @@ def mock_context(mock_settings):
     return context
 
 
-async def test_sessions_shows_picker_with_sessions(
+async def test_resume_shows_picker_with_sessions(
     orchestrator, mock_update, mock_context, mock_settings
 ):
     """Shows session picker with 2 sessions + New Session button."""
@@ -86,7 +86,10 @@ async def test_sessions_shows_picker_with_sessions(
             with patch(
                 "src.bot.orchestrator.check_history_format_health", return_value=None
             ):
-                await orchestrator.agentic_sessions(mock_update, mock_context)
+                with patch(
+                    "src.bot.orchestrator.read_first_message", return_value=None
+                ):
+                    await orchestrator.agentic_resume(mock_update, mock_context)
 
     # Verify reply was called
     mock_update.message.reply_text.assert_called_once()
@@ -105,13 +108,13 @@ async def test_sessions_shows_picker_with_sessions(
     # Should have 3 buttons: 2 sessions + New Session
     assert len(buttons) == 3
 
-    # Check first session button (newest first)
-    assert "02/25" in buttons[0][0].text
-    assert "First session" in buttons[0][0].text
+    # Check first session button (newest first) — label uses relative time
+    label0 = buttons[0][0].text
+    assert "ago" in label0 or "just now" in label0
+    assert "First session" in label0
     assert buttons[0][0].callback_data == "session:sess-1"
 
     # Check second session button (truncated display name)
-    assert "02/24" in buttons[1][0].text
     assert len(buttons[1][0].text) < 80  # Should be truncated
     assert buttons[1][0].callback_data == "session:sess-2"
 
@@ -120,7 +123,7 @@ async def test_sessions_shows_picker_with_sessions(
     assert buttons[2][0].callback_data == "session:new"
 
 
-async def test_sessions_empty_shows_new_only(
+async def test_resume_empty_shows_new_only(
     orchestrator, mock_update, mock_context, mock_settings
 ):
     """No sessions shows just New Session button."""
@@ -129,7 +132,7 @@ async def test_sessions_empty_shows_new_only(
             with patch(
                 "src.bot.orchestrator.check_history_format_health", return_value=None
             ):
-                await orchestrator.agentic_sessions(mock_update, mock_context)
+                await orchestrator.agentic_resume(mock_update, mock_context)
 
     mock_update.message.reply_text.assert_called_once()
     call_kwargs = mock_update.message.reply_text.call_args.kwargs
@@ -147,7 +150,7 @@ async def test_sessions_empty_shows_new_only(
 
 
 async def test_session_callback_resumes(orchestrator, mock_settings):
-    """Tapping session button sets session_id in context."""
+    """Tapping session button sets session_id in context and calls switch_session."""
     settings, project_dir = mock_settings
 
     query = MagicMock()
@@ -159,26 +162,36 @@ async def test_session_callback_resumes(orchestrator, mock_settings):
     update = MagicMock()
     update.callback_query = query
 
+    mock_client_manager = MagicMock()
+    mock_client_manager.switch_session = AsyncMock()
+
     context = MagicMock()
     context.user_data = {}
     context.bot_data = {
         "settings": settings,
         "audit_logger": None,
+        "client_manager": mock_client_manager,
     }
 
-    await orchestrator._agentic_callback(update, context)
+    with patch("src.bot.orchestrator.read_session_transcript", return_value=[]):
+        await orchestrator._agentic_callback(update, context)
 
     # Check session_id was set
     assert context.user_data.get("claude_session_id") == "sess-abc123"
 
+    # Check switch_session was called (eager connect)
+    mock_client_manager.switch_session.assert_called_once()
+    call_kwargs = mock_client_manager.switch_session.call_args.kwargs
+    assert call_kwargs["session_id"] == "sess-abc123"
+
     # Check response message
     query.edit_message_text.assert_called_once()
     message = query.edit_message_text.call_args.args[0]
-    assert "Resumed session" in message
+    assert "Session resumed" in message or "resumed" in message.lower()
 
 
 async def test_session_callback_new(orchestrator, mock_settings):
-    """Tapping New Session button sets force_new_session flag."""
+    """Tapping New Session button calls get_or_connect (eager connect)."""
     settings, _ = mock_settings
 
     query = MagicMock()
@@ -190,28 +203,41 @@ async def test_session_callback_new(orchestrator, mock_settings):
     update = MagicMock()
     update.callback_query = query
 
+    mock_client = MagicMock()
+    mock_client.session_id = "new-sess-xyz"
+
+    mock_client_manager = MagicMock()
+    mock_client_manager.get_or_connect = AsyncMock(return_value=mock_client)
+
     context = MagicMock()
     context.user_data = {}
     context.bot_data = {
         "settings": settings,
         "audit_logger": None,
+        "client_manager": mock_client_manager,
     }
 
     await orchestrator._agentic_callback(update, context)
 
-    # Check force_new_session flag was set
-    assert context.user_data.get("force_new_session") is True
+    # Check get_or_connect was called (eager connect)
+    mock_client_manager.get_or_connect.assert_called_once()
+    call_kwargs = mock_client_manager.get_or_connect.call_args.kwargs
+    assert call_kwargs["force_new"] is True
+
+    # After eager connect, force_new_session should be cleared
+    assert context.user_data.get("force_new_session") is False
+    assert context.user_data.get("claude_session_id") == "new-sess-xyz"
 
     # Check response message
     query.edit_message_text.assert_called_once()
     message = query.edit_message_text.call_args.args[0]
-    assert "Starting new session" in message
+    assert "New session" in message or "new session" in message.lower()
 
 
-async def test_sessions_warns_on_malformed_history(
+async def test_resume_warns_on_malformed_history(
     orchestrator, mock_update, mock_context
 ):
-    """Sessions command shows warning if history has >50% malformed entries."""
+    """Resume command shows warning if history has >50% malformed entries."""
     warning_message = "History file has 75.0% malformed entries (3/4). Consider backing up and recreating the file."
 
     with patch("src.bot.orchestrator.read_claude_history", return_value=[]):
@@ -220,7 +246,7 @@ async def test_sessions_warns_on_malformed_history(
                 "src.bot.orchestrator.check_history_format_health",
                 return_value=warning_message,
             ):
-                await orchestrator.agentic_sessions(mock_update, mock_context)
+                await orchestrator.agentic_resume(mock_update, mock_context)
 
     # Should have been called twice: once for warning, once for session list
     assert mock_update.message.reply_text.call_count == 2
@@ -232,10 +258,10 @@ async def test_sessions_warns_on_malformed_history(
     assert "malformed entries" in warning_text
 
 
-async def test_sessions_caps_at_10_sessions(
+async def test_resume_caps_at_10_sessions(
     orchestrator, mock_update, mock_context, mock_settings
 ):
-    """Sessions list shows max 10 sessions even if more exist."""
+    """Resume list shows max 10 sessions even if more exist."""
     _, project_dir = mock_settings
 
     # Create 15 mock history entries
@@ -258,7 +284,10 @@ async def test_sessions_caps_at_10_sessions(
             with patch(
                 "src.bot.orchestrator.check_history_format_health", return_value=None
             ):
-                await orchestrator.agentic_sessions(mock_update, mock_context)
+                with patch(
+                    "src.bot.orchestrator.read_first_message", return_value=None
+                ):
+                    await orchestrator.agentic_resume(mock_update, mock_context)
 
     call_kwargs = mock_update.message.reply_text.call_args.kwargs
     reply_markup = call_kwargs["reply_markup"]
@@ -269,10 +298,10 @@ async def test_sessions_caps_at_10_sessions(
     assert buttons[-1][0].callback_data == "session:new"
 
 
-async def test_sessions_falls_back_to_first_approved_dir(
+async def test_resume_falls_back_to_first_approved_dir(
     orchestrator, mock_update, mock_settings
 ):
-    """Sessions uses first approved directory when current_directory not set."""
+    """Resume uses first approved directory when current_directory not set."""
     settings, project_dir = mock_settings
 
     context = MagicMock()
@@ -286,7 +315,7 @@ async def test_sessions_falls_back_to_first_approved_dir(
             with patch(
                 "src.bot.orchestrator.check_history_format_health", return_value=None
             ):
-                await orchestrator.agentic_sessions(mock_update, context)
+                await orchestrator.agentic_resume(mock_update, context)
 
     # filter_by_directory should have been called with first approved directory
     mock_filter.assert_called_once()

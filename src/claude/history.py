@@ -383,3 +383,69 @@ def append_history_entry(
             path=str(history_path),
             error=str(e),
         )
+
+
+def read_first_message(
+    session_id: str,
+    project_dir: str,
+    projects_dir: Path = DEFAULT_PROJECTS_DIR,
+) -> Optional[str]:
+    """Read the first user message from a session transcript.
+
+    Args:
+        session_id: The session UUID
+        project_dir: The project directory path
+        projects_dir: Base directory for project transcripts
+
+    Returns:
+        The first user message text, or None if not found.
+    """
+    slug = _project_slug(project_dir)
+    transcript_path = projects_dir / slug / f"{session_id}.jsonl"
+
+    if not transcript_path.exists():
+        return None
+
+    try:
+        with transcript_path.open("r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if data.get("type") != "user":
+                    continue
+
+                msg = data.get("message", {})
+                if not isinstance(msg, dict):
+                    continue
+
+                content = msg.get("content", "")
+                text = ""
+
+                if isinstance(content, str):
+                    text = content.strip()
+                elif isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text = block["text"].strip()
+                            break
+
+                if not text or text.startswith("<"):
+                    continue
+
+                return text
+
+    except Exception as e:
+        logger.warning(
+            "Failed to read first message",
+            session_id=session_id,
+            error=str(e),
+        )
+
+    return None

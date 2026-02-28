@@ -82,7 +82,7 @@ def deps():
 
 
 def test_agentic_registers_commands(agentic_settings, deps):
-    """Agentic mode registers start, new, interrupt, status, verbose, compact, model, repo, sessions, resume, commands."""
+    """Agentic mode registers start, new, interrupt, status, verbose, compact, model, repo, resume, commands."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     app = MagicMock()
     app.add_handler = MagicMock()
@@ -99,7 +99,7 @@ def test_agentic_registers_commands(agentic_settings, deps):
     ]
     commands = [h[0][0].commands for h in cmd_handlers]
 
-    assert len(cmd_handlers) == 11
+    assert len(cmd_handlers) == 10
     assert frozenset({"start"}) in commands
     assert frozenset({"new"}) in commands
     assert frozenset({"interrupt"}) in commands
@@ -108,7 +108,6 @@ def test_agentic_registers_commands(agentic_settings, deps):
     assert frozenset({"compact"}) in commands
     assert frozenset({"model"}) in commands
     assert frozenset({"repo"}) in commands
-    assert frozenset({"sessions"}) in commands
     assert frozenset({"resume"}) in commands
     assert frozenset({"commands"}) in commands
 
@@ -160,11 +159,11 @@ def test_agentic_registers_text_document_photo_handlers(agentic_settings, deps):
 
 
 async def test_agentic_bot_commands(agentic_settings, deps):
-    """Agentic mode returns 11 bot commands."""
+    """Agentic mode returns 10 bot commands."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     commands = await orchestrator.get_bot_commands()
 
-    assert len(commands) == 11
+    assert len(commands) == 10
     cmd_names = [c.command for c in commands]
     assert cmd_names == [
         "start",
@@ -175,7 +174,6 @@ async def test_agentic_bot_commands(agentic_settings, deps):
         "compact",
         "model",
         "repo",
-        "sessions",
         "resume",
         "commands",
     ]
@@ -221,7 +219,7 @@ async def test_agentic_start_no_keyboard(agentic_settings, deps):
 
 
 async def test_agentic_new_resets_session(agentic_settings, deps):
-    """Agentic /new clears session and sends brief confirmation."""
+    """Agentic /new clears session and sends fallback confirmation when no client_manager."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
 
     update = MagicMock()
@@ -234,7 +232,64 @@ async def test_agentic_new_resets_session(agentic_settings, deps):
     await orchestrator.agentic_new(update, context)
 
     assert context.user_data["claude_session_id"] is None
-    update.message.reply_text.assert_called_once_with("Session reset. What's next?")
+    update.message.reply_text.assert_called_once_with(
+        "Session reset. Will connect on your next message.",
+    )
+
+
+async def test_agentic_new_eagerly_connects_sdk(agentic_settings, deps, tmp_path):
+    """/new should eagerly call get_or_connect to init SDK session."""
+    orchestrator = MessageOrchestrator(agentic_settings, deps)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    update = MagicMock()
+    update.effective_user.id = 42
+    update.message.reply_text = AsyncMock()
+
+    context = MagicMock()
+    context.user_data = {"current_directory": project_dir}
+
+    client_manager = MagicMock()
+    mock_client = MagicMock()
+    mock_client.session_id = "new-sess-123"
+    client_manager.disconnect = AsyncMock()
+    client_manager.get_or_connect = AsyncMock(return_value=mock_client)
+    context.bot_data = {"client_manager": client_manager}
+
+    await orchestrator.agentic_new(update, context)
+
+    client_manager.get_or_connect.assert_called_once()
+    call_kwargs = client_manager.get_or_connect.call_args
+    assert call_kwargs.kwargs.get("force_new") is True
+    assert context.user_data["claude_session_id"] == "new-sess-123"
+    assert context.user_data["force_new_session"] is False
+    msg = update.message.reply_text.call_args[0][0]
+    assert "Ready" in msg
+
+
+async def test_agentic_new_connection_failure_falls_back(agentic_settings, deps, tmp_path):
+    """/new falls back gracefully if SDK connection fails."""
+    orchestrator = MessageOrchestrator(agentic_settings, deps)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    update = MagicMock()
+    update.effective_user.id = 42
+    update.message.reply_text = AsyncMock()
+
+    context = MagicMock()
+    context.user_data = {"current_directory": project_dir}
+
+    client_manager = MagicMock()
+    client_manager.disconnect = AsyncMock()
+    client_manager.get_or_connect = AsyncMock(side_effect=Exception("connection error"))
+    context.bot_data = {"client_manager": client_manager}
+
+    await orchestrator.agentic_new(update, context)
+
+    update.message.reply_text.assert_called_once()
+    assert context.user_data.get("force_new_session") is True
 
 
 async def test_agentic_status_compact(agentic_settings, deps):

@@ -318,6 +318,96 @@ class TestDirectoryPersistence:
         )
 
 
+class TestSelectDirectoryPureSwitch:
+    """Test that _select_directory is a pure directory switch without auto-resume."""
+
+    @pytest.mark.asyncio
+    async def test_select_directory_does_not_set_session_id(
+        self, single_root_tmpdir, mock_deps, mock_update_and_context
+    ):
+        """_select_directory should NOT look up or set claude_session_id from history."""
+        settings = create_test_config(
+            approved_directory=str(single_root_tmpdir),
+            agentic_mode=True,
+        )
+
+        update, context = mock_update_and_context
+        update.message.text = "/repo project_a"
+        context.bot_data = mock_deps
+
+        orchestrator = MessageOrchestrator(settings, mock_deps)
+        await orchestrator.agentic_repo(update, context)
+
+        # session_id must be explicitly None — no auto-resume
+        assert context.user_data["claude_session_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_select_directory_clears_force_new_session(
+        self, single_root_tmpdir, mock_deps, mock_update_and_context
+    ):
+        """_select_directory should reset force_new_session to False."""
+        settings = create_test_config(
+            approved_directory=str(single_root_tmpdir),
+            agentic_mode=True,
+        )
+
+        update, context = mock_update_and_context
+        update.message.text = "/repo project_a"
+        context.bot_data = mock_deps
+        context.user_data["force_new_session"] = True  # pre-set
+
+        orchestrator = MessageOrchestrator(settings, mock_deps)
+        await orchestrator.agentic_repo(update, context)
+
+        assert context.user_data["force_new_session"] is False
+
+    @pytest.mark.asyncio
+    async def test_select_directory_disconnects_active_client(
+        self, single_root_tmpdir, mock_deps, mock_update_and_context
+    ):
+        """_select_directory disconnects any active SDK client."""
+        settings = create_test_config(
+            approved_directory=str(single_root_tmpdir),
+            agentic_mode=True,
+        )
+
+        client_manager = MagicMock()
+        client_manager.disconnect = AsyncMock()
+        mock_deps_with_cm = dict(mock_deps)
+        mock_deps_with_cm["client_manager"] = client_manager
+
+        update, context = mock_update_and_context
+        update.message.text = "/repo project_a"
+        context.bot_data = mock_deps_with_cm
+
+        orchestrator = MessageOrchestrator(settings, mock_deps_with_cm)
+        await orchestrator.agentic_repo(update, context)
+
+        # disconnect should be called with the user's id
+        client_manager.disconnect.assert_called_once_with(12345)
+
+    @pytest.mark.asyncio
+    async def test_select_directory_reply_has_no_session_badge(
+        self, single_root_tmpdir, mock_deps, mock_update_and_context
+    ):
+        """Reply text should not contain 'session resumed' after switching."""
+        settings = create_test_config(
+            approved_directory=str(single_root_tmpdir),
+            agentic_mode=True,
+        )
+
+        update, context = mock_update_and_context
+        update.message.text = "/repo project_a"
+        context.bot_data = mock_deps
+
+        orchestrator = MessageOrchestrator(settings, mock_deps)
+        await orchestrator.agentic_repo(update, context)
+
+        call_args = update.message.reply_text.call_args
+        reply_text = call_args[0][0]
+        assert "session resumed" not in reply_text
+
+
 class TestBackwardCompatibility:
     """Test backward compatibility with single approved_directory."""
 

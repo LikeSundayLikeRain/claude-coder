@@ -146,3 +146,6 @@ data/
 sessions/
 backups/
 uploads/
+
+# Worktrees
+.worktrees/

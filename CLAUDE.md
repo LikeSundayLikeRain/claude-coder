@@ -38,7 +38,7 @@ uv run mypy src
 
 **Classic mode** still uses `ClaudeIntegration` (facade in `src/claude/facade.py`) wrapping `ClaudeSDKManager` (`src/claude/sdk_integration.py`).
 
-Sessions auto-resume: per user+directory, read from Claude CLI's `~/.claude/history.jsonl`. Real-time streaming enabled via `include_partial_messages=True`. Native skill/plugin discovery via `tools={"type": "preset", "preset": "claude_code"}` and `setting_sources=["user", "project"]`.
+Session lifecycle follows CLI conventions: `/repo` switches directories (like `cd`), `/new` eagerly initializes a fresh session, `/resume` shows a session picker (like `claude --resume`). Sending a message without an active session triggers an implicit `/new`. Real-time streaming enabled via `include_partial_messages=True`. Native skill/plugin discovery via `tools={"type": "preset", "preset": "claude_code"}` and `setting_sources=["user", "project"]`.
 
 ### Request Flow
 
@@ -86,7 +86,7 @@ context.bot_data["security_validator"]
 - `src/claude/` -- Claude integration: `client_manager.py` (per-user clients), `user_client.py` (SDK wrapper), `options.py` (SDK options builder), `stream_handler.py` (message parsing), `session.py` (session resolver), `monitor.py` (tool monitoring), `facade.py` (classic mode)
 - `src/skills/` -- Skill/plugin discovery from `installed_plugins.json`, prefix matching, namespace resolution
 - `src/projects/` -- Multi-project support: `registry.py` (YAML project config), `thread_manager.py` (Telegram topic sync/routing)
-- `src/storage/` -- SQLite via aiosqlite, repository pattern (users, sessions, messages, tool_usage, audit_log, project_threads, bot_sessions)
+- `src/storage/` -- SQLite via aiosqlite (pysqlite3 for modern features), repository pattern (users, audit_log, project_threads, bot_sessions). The `__init__.py` patches `sys.modules["sqlite3"]` before any submodule imports aiosqlite.
 - `src/security/` -- Multi-provider auth (whitelist + token), input validators (with optional `disable_security_patterns`), audit logging
 - `src/events/` -- EventBus (async pub/sub), event types, AgentHandler, EventSecurityMiddleware
 - `src/api/` -- FastAPI webhook server, GitHub HMAC-SHA256 + Bearer token auth
@@ -133,7 +133,7 @@ All datetimes use timezone-aware UTC: `datetime.now(UTC)` (not `datetime.utcnow(
 
 ### Agentic mode
 
-Agentic mode commands: `/start`, `/new`, `/status`, `/verbose`, `/repo`, `/interrupt`, `/model`. Unrecognized `/commands` are routed to skill lookup. If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`. To add a new command:
+Agentic mode commands: `/start`, `/new`, `/resume`, `/status`, `/verbose`, `/repo`, `/interrupt`, `/model`. Unrecognized `/commands` are routed to skill lookup. If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`. To add a new command:
 
 1. Add handler function in `src/bot/orchestrator.py`
 2. Register in `MessageOrchestrator._register_agentic_handlers()`

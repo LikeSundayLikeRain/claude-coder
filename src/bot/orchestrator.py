@@ -27,8 +27,8 @@ from ..claude.history import (
     append_history_entry,
     check_history_format_health,
     filter_by_directory,
-    find_session_by_id,
     read_claude_history,
+    read_first_message,
     read_session_transcript,
 )
 from ..config.settings import Settings
@@ -41,6 +41,7 @@ from .utils.repo_browser import (
     list_visible_children,
     resolve_browse_path,
 )
+from .utils.time_format import relative_time
 
 logger = structlog.get_logger()
 
@@ -308,7 +309,6 @@ class MessageOrchestrator:
             ("compact", self.agentic_compact),
             ("model", self.handle_model),
             ("repo", self.agentic_repo),
-            ("sessions", self.agentic_sessions),
             ("resume", self.agentic_resume),
             ("commands", self.agentic_commands),
         ]
@@ -421,8 +421,7 @@ class MessageOrchestrator:
                 BotCommand("compact", "Compress context, keep continuity"),
                 BotCommand("model", "Switch Claude model"),
                 BotCommand("repo", "List repos / switch workspace"),
-                BotCommand("sessions", "Choose a session to resume"),
-                BotCommand("resume", "Resume a session by ID"),
+                BotCommand("resume", "Choose a session to resume"),
                 BotCommand("commands", "Browse available skills"),
             ]
             if self.settings.enable_project_threads:
@@ -574,7 +573,7 @@ class MessageOrchestrator:
             f"/interrupt — Interrupt running query\n"
             f"/status — Current session info\n"
             f"/model — Switch Claude model\n"
-            f"/sessions — Pick a session to resume\n"
+            f"/resume — Pick a session to resume\n"
             f"/commands — Browse available skills\n"
             f"/compact — Compress context\n"
             f"/repo — Switch workspace\n"
@@ -586,18 +585,50 @@ class MessageOrchestrator:
     async def agentic_new(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Reset session, one-line confirmation."""
+        """Start a fresh SDK session in the current directory."""
         user_id = update.effective_user.id
         context.user_data["claude_session_id"] = None
         context.user_data["session_started"] = True
         context.user_data["force_new_session"] = True
 
-        # Disconnect persistent client so next message starts fresh
         client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
         if client_manager:
             await client_manager.disconnect(user_id)
 
-        await update.message.reply_text("Session reset. What's next?")
+        # Eagerly connect so skills/commands are available immediately
+        current_dir = context.user_data.get(
+            "current_directory", self.settings.approved_directories[0]
+        )
+
+        if client_manager:
+            try:
+                client = await client_manager.get_or_connect(
+                    user_id=user_id,
+                    directory=str(current_dir),
+                    session_id=None,
+                    force_new=True,
+                    approved_directory=str(self.settings.approved_directories[0]),
+                )
+                context.user_data["claude_session_id"] = client.session_id
+                context.user_data["force_new_session"] = False
+
+                dir_name = (
+                    current_dir.name
+                    if hasattr(current_dir, "name")
+                    else str(current_dir).rsplit("/", 1)[-1]
+                )
+                await update.message.reply_text(
+                    f"New session in <code>{escape_html(dir_name)}/</code>. Ready.",
+                    parse_mode="HTML",
+                )
+                return
+            except Exception:
+                logger.debug("new_session_eager_connect_failed", user_id=user_id)
+
+        # Fallback: lazy connect on next message
+        await update.message.reply_text(
+            "Session reset. Will connect on your next message.",
+        )
 
     async def agentic_status(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1152,6 +1183,9 @@ class MessageOrchestrator:
         # Check if /new was used — skip auto-resume for this first message.
         # Flag is only cleared after a successful run so retries keep the intent.
         force_new = bool(context.user_data.get("force_new_session"))
+        # Implicit /new: if no session is set (e.g. after /repo), start fresh
+        if not force_new and session_id is None:
+            force_new = True
 
         # --- Verbose progress tracking via stream callback ---
         tool_log: List[Dict[str, Any]] = []
@@ -1346,6 +1380,9 @@ class MessageOrchestrator:
         # Check if /new was used — skip auto-resume for this first message.
         # Flag is only cleared after a successful run so retries keep the intent.
         force_new = bool(context.user_data.get("force_new_session"))
+        # Implicit /new: if no session is set (e.g. after /repo), start fresh
+        if not force_new and session_id is None:
+            force_new = True
 
         verbose_level = self._get_verbose_level(context)
         tool_log: List[Dict[str, Any]] = []
@@ -1434,6 +1471,9 @@ class MessageOrchestrator:
             # Check if /new was used — skip auto-resume for this first message.
             # Flag is only cleared after a successful run so retries keep the intent.
             force_new = bool(context.user_data.get("force_new_session"))
+            # Implicit /new: if no session is set (e.g. after /repo), start fresh
+            if not force_new and session_id is None:
+                force_new = True
 
             verbose_level = self._get_verbose_level(context)
             tool_log: List[Dict[str, Any]] = []
@@ -1612,30 +1652,26 @@ class MessageOrchestrator:
         edit: bool = False,
         user_id: Optional[int] = None,
     ) -> None:
-        """Select a directory: set as working dir, resume session."""
+        """Select a directory: set as working dir, disconnect active session."""
         context.user_data["current_directory"] = target_path
 
         if storage and user_id:
             await storage.save_user_directory(user_id, str(target_path))
 
-        # Look for resumable session
-        session_id = None
+        # Clear session — user must /new or /resume explicitly.
+        context.user_data["claude_session_id"] = None
+        context.user_data["force_new_session"] = False
+
+        # Disconnect active SDK session
         client_manager = context.bot_data.get("client_manager")
-        if client_manager:
-            session_id = client_manager.get_latest_session(str(target_path))
-        else:
-            claude_integration = context.bot_data.get("claude_integration")
-            if claude_integration:
-                session_id = claude_integration._find_resumable_session_id(target_path)
-        context.user_data["claude_session_id"] = session_id
+        if client_manager and user_id:
+            await client_manager.disconnect(user_id)
 
         is_git = (target_path / ".git").is_dir()
         git_badge = " (git)" if is_git else ""
-        session_badge = " · session resumed" if session_id else ""
 
         text = (
-            f"Switched to <code>{escape_html(target_path.name)}/</code>"
-            f"{git_badge}{session_badge}"
+            f"Switched to <code>{escape_html(target_path.name)}/</code>" f"{git_badge}"
         )
 
         if edit:
@@ -1705,7 +1741,7 @@ class MessageOrchestrator:
             reply_markup=reply_markup,
         )
 
-    async def agentic_sessions(
+    async def agentic_resume(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show session picker for current directory."""
@@ -1746,16 +1782,17 @@ class MessageOrchestrator:
         keyboard_rows: List[list] = []  # type: ignore[type-arg]
 
         if sorted_entries:
-            from datetime import UTC, datetime
-
             # Cap at 10 sessions
             for entry in sorted_entries[:10]:
-                # Format date from millisecond timestamp
-                ts_dt = datetime.fromtimestamp(entry.timestamp / 1000.0, tz=UTC)
-                date_str = ts_dt.strftime("%m/%d")
-                # Truncate display name to 45 chars
-                display_name = (entry.display or entry.session_id[:12])[:45]
-                button_label = f"{date_str} — {display_name}"
+                time_str = relative_time(entry.timestamp)
+                first_msg = read_first_message(
+                    session_id=entry.session_id,
+                    project_dir=entry.project,
+                )
+                display_name = (first_msg or entry.display or entry.session_id[:12])[
+                    :45
+                ]
+                button_label = f"{time_str} — {display_name}"
 
                 keyboard_rows.append(
                     [
@@ -1788,106 +1825,6 @@ class MessageOrchestrator:
             parse_mode="Markdown",
             reply_markup=reply_markup,
         )
-
-    async def agentic_resume(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Resume a session by its ID, with transcript preview."""
-        if not update.message or not update.message.text:
-            return
-
-        # Delete the /resume command message for a clean chat experience
-        chat_id = update.message.chat_id
-        try:
-            await update.message.delete()
-        except Exception:
-            pass  # may lack delete permission in groups
-
-        parts = update.message.text.strip().split(maxsplit=1)
-        if len(parts) < 2 or not parts[1].strip():
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="Usage: /resume <session_id>",
-                parse_mode="HTML",
-            )
-            return
-
-        session_id = parts[1].strip()
-        user_id = update.effective_user.id
-
-        # Look up session in history to get project directory
-        history_entries = read_claude_history()
-        entry = find_session_by_id(history_entries, session_id)
-
-        if entry is None:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="Session not found in history.",
-                parse_mode="HTML",
-            )
-            audit_logger = context.bot_data.get("audit_logger")
-            if audit_logger:
-                await audit_logger.log_command(
-                    user_id=user_id,
-                    command="resume",
-                    args=[session_id],
-                    success=False,
-                )
-            return
-
-        # Set session and directory in user context
-        context.user_data["claude_session_id"] = session_id
-        context.user_data["current_directory"] = Path(entry.project)
-
-        # Switch active client if one exists (stops old, connects new)
-        client_manager = context.bot_data.get("client_manager")
-        if client_manager:
-            try:
-                await client_manager.switch_session(
-                    user_id=user_id,
-                    session_id=session_id,
-                    directory=entry.project,
-                    approved_directory=str(self.settings.approved_directories[0]),
-                )
-            except Exception:
-                logger.debug("session_switch_deferred", session_id=session_id)
-
-        # Build transcript preview
-        lines: list[str] = ["\U0001f4c2 <b>Session resumed</b>\n"]
-
-        try:
-            transcript = read_session_transcript(
-                session_id=session_id,
-                project_dir=entry.project,
-                limit=3,
-            )
-            if transcript:
-                lines.append("<b>Recent:</b>")
-                for msg in transcript:
-                    preview = msg.text[:120]
-                    if len(msg.text) > 120:
-                        preview += "\u2026"
-                    label = "You" if msg.role == "user" else "Claude"
-                    lines.append(f"  <b>{label}:</b> {escape_html(preview)}")
-        except Exception:
-            logger.debug("transcript_preview_failed", session_id=session_id)
-
-        lines.append("\nSend your next message to continue.")
-
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="\n".join(lines),
-            parse_mode="HTML",
-        )
-
-        audit_logger = context.bot_data.get("audit_logger")
-        if audit_logger:
-            await audit_logger.log_command(
-                user_id=user_id,
-                command="resume",
-                args=[session_id],
-                success=True,
-            )
 
     async def _agentic_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1923,6 +1860,9 @@ class MessageOrchestrator:
             # Execute via Claude
             user_id = query.from_user.id
             force_new = bool(context.user_data.get("force_new_session"))
+            # Implicit /new: if no session is set (e.g. after /repo), start fresh
+            if not force_new and session_id is None:
+                force_new = True
 
             verbose_level = self._get_verbose_level(context)
             tool_log: List[Dict[str, Any]] = []
@@ -2122,21 +2062,58 @@ class MessageOrchestrator:
         if prefix == "session":
             if value == "new":
                 context.user_data["force_new_session"] = True
-                await query.edit_message_text(
-                    "✨ Starting new session",
-                    parse_mode="HTML",
-                )
-            else:
-                # Resume session by ID
-                context.user_data["claude_session_id"] = value
-
-                # Load recent messages from session transcript
+                # Eager connect like /new
+                client_manager = context.bot_data.get("client_manager")
                 current_dir = context.user_data.get(
                     "current_directory",
                     self.settings.approved_directories[0],
                 )
-                recent_lines: List[str] = ["📂 <b>Resumed session</b>\n"]
+                if client_manager:
+                    try:
+                        client = await client_manager.get_or_connect(
+                            user_id=query.from_user.id,
+                            directory=str(current_dir),
+                            session_id=None,
+                            force_new=True,
+                            approved_directory=str(
+                                self.settings.approved_directories[0]
+                            ),
+                        )
+                        context.user_data["claude_session_id"] = client.session_id
+                        context.user_data["force_new_session"] = False
+                    except Exception:
+                        pass  # Will lazy-connect on next message
+                await query.edit_message_text(
+                    "New session started. Ready.",
+                    parse_mode="HTML",
+                )
+            else:
+                # Resume session by ID — eagerly connect
+                context.user_data["claude_session_id"] = value
+                current_dir = context.user_data.get(
+                    "current_directory",
+                    self.settings.approved_directories[0],
+                )
+                client_manager = context.bot_data.get("client_manager")
+                if client_manager:
+                    try:
+                        await client_manager.switch_session(
+                            user_id=query.from_user.id,
+                            session_id=value,
+                            directory=str(current_dir),
+                            approved_directory=str(
+                                self.settings.approved_directories[0]
+                            ),
+                        )
+                    except Exception:
+                        logger.debug(
+                            "session_callback_eager_connect_failed", session_id=value
+                        )
 
+                # Show transcript preview (last 3 messages)
+                recent_lines: List[str] = [
+                    "\U0001f4c2 <b>Session resumed. Ready.</b>\n"
+                ]
                 try:
                     transcript = read_session_transcript(
                         session_id=value,
@@ -2148,7 +2125,7 @@ class MessageOrchestrator:
                         for msg in transcript:
                             preview = msg.text[:120]
                             if len(msg.text) > 120:
-                                preview += "…"
+                                preview += "\u2026"
                             label = "You" if msg.role == "user" else "Claude"
                             recent_lines.append(
                                 f"  <b>{label}:</b> {escape_html(preview)}"
@@ -2207,28 +2184,22 @@ class MessageOrchestrator:
         if storage:
             await storage.save_user_directory(query.from_user.id, str(new_path))
 
-        # Look for a resumable session instead of always clearing
-        session_id = None
+        # Clear session — user must /new or /resume explicitly
+        context.user_data["claude_session_id"] = None
+        context.user_data["force_new_session"] = False
+
+        # Disconnect active SDK session
         client_manager_cd: Optional[ClientManager] = context.bot_data.get(
             "client_manager"
         )
         if client_manager_cd:
-            session_id = client_manager_cd.get_latest_session(str(new_path))
-        else:
-            # Legacy fallback: only reachable in classic mode or tests
-            # without a ClientManager. Agentic mode always has one.
-            claude_integration = context.bot_data.get("claude_integration")
-            if claude_integration:
-                session_id = claude_integration._find_resumable_session_id(new_path)
-        context.user_data["claude_session_id"] = session_id
+            await client_manager_cd.disconnect(query.from_user.id)
 
         is_git = (new_path / ".git").is_dir()
         git_badge = " (git)" if is_git else ""
-        session_badge = " · session resumed" if session_id else ""
 
         await query.edit_message_text(
-            f"Switched to <code>{escape_html(new_path.name)}/</code>"
-            f"{git_badge}{session_badge}",
+            f"Switched to <code>{escape_html(new_path.name)}/</code>" f"{git_badge}",
             parse_mode="HTML",
         )
 
