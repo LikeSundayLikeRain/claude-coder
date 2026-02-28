@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     # NOTE: When changing this list, also update docs/tools.md,
     # docs/configuration.md, .env.example,
     # src/claude/facade.py (_get_admin_instructions),
-    # and src/bot/orchestrator.py (_TOOL_ICONS).
+    # and src/bot/progress.py (TOOL_ICONS).
     claude_allowed_tools: Optional[List[str]] = Field(
         default=[
             "Read",
@@ -145,18 +145,6 @@ class Settings(BaseSettings):
     agentic_mode: bool = Field(
         True,
         description="Conversational agentic mode (default) vs classic command mode",
-    )
-
-    # Output verbosity (0=quiet, 1=normal, 2=detailed)
-    verbose_level: int = Field(
-        1,
-        description=(
-            "Bot output verbosity: 0=quiet (final response only), "
-            "1=normal (tool names + reasoning), "
-            "2=detailed (tool inputs + longer reasoning)"
-        ),
-        ge=0,
-        le=2,
     )
 
     # Monitoring

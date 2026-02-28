@@ -286,6 +286,151 @@ class TestUserClientSkillsCache:
         assert client.has_command("nonexistent") is False
 
 
+class TestProcessItemStreamForwarding:
+    """Test that _process_item forwards stream events to on_stream callback."""
+
+    @pytest.mark.asyncio
+    async def test_user_event_forwarded_as_tool_result(self) -> None:
+        """'user' events with content are forwarded as 'tool_result'."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from src.claude.stream_handler import StreamEvent
+
+        received: list[tuple[str, object]] = []
+
+        async def on_stream(event_type: str, content: object) -> None:
+            received.append((event_type, content))
+
+        # Build a fake UserMessage that stream_handler returns as type="user"
+        fake_user_msg = MagicMock()
+        fake_user_msg.__class__.__name__ = "UserMessage"
+        fake_user_msg.content = "tool output text"
+
+        # A ResultMessage that ends the loop
+        fake_result_msg = MagicMock()
+        fake_result_msg.__class__.__name__ = "ResultMessage"
+        fake_result_msg.result = "done"
+        fake_result_msg.session_id = "s1"
+        fake_result_msg.total_cost_usd = 0.0
+
+        mock_query = AsyncMock()
+        mock_query.receive_messages = MagicMock(
+            return_value=_async_iter([fake_user_msg, fake_result_msg])
+        )
+
+        mock_sdk = AsyncMock()
+        mock_sdk._query = mock_query
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[object] = loop.create_future()
+        item = WorkItem(prompt="hello", future=future, on_stream=on_stream)
+
+        client = UserClient(user_id=1, directory="/dir")
+        client._sdk_client = mock_sdk  # type: ignore[assignment]
+        client._querying = False
+
+        # Patch parse_message to return the raw messages as-is (stream_handler
+        # dispatches by __class__.__name__, so the mocks already carry the right name)
+        with patch(
+            "src.claude.user_client.parse_message", side_effect=lambda m: m
+        ):
+            await client._process_item(item)
+
+        assert ("tool_result", "tool output text") in received
+
+    @pytest.mark.asyncio
+    async def test_user_event_not_forwarded_without_on_stream(self) -> None:
+        """'user' events are silently dropped when no on_stream callback is set."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        fake_user_msg = MagicMock()
+        fake_user_msg.__class__.__name__ = "UserMessage"
+        fake_user_msg.content = "tool output text"
+
+        fake_result_msg = MagicMock()
+        fake_result_msg.__class__.__name__ = "ResultMessage"
+        fake_result_msg.result = "done"
+        fake_result_msg.session_id = "s1"
+        fake_result_msg.total_cost_usd = 0.0
+
+        mock_query = AsyncMock()
+        mock_query.receive_messages = MagicMock(
+            return_value=_async_iter([fake_user_msg, fake_result_msg])
+        )
+
+        mock_sdk = AsyncMock()
+        mock_sdk._query = mock_query
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[object] = loop.create_future()
+        item = WorkItem(prompt="hello", future=future, on_stream=None)
+
+        client = UserClient(user_id=1, directory="/dir")
+        client._sdk_client = mock_sdk  # type: ignore[assignment]
+        client._querying = False
+
+        with patch(
+            "src.claude.user_client.parse_message", side_effect=lambda m: m
+        ):
+            await client._process_item(item)
+
+        # No exception means the branch was safely skipped
+        assert future.done()
+
+    @pytest.mark.asyncio
+    async def test_user_event_with_empty_content_not_forwarded(self) -> None:
+        """'user' events with empty content are not forwarded."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        received: list[tuple[str, object]] = []
+
+        async def on_stream(event_type: str, content: object) -> None:
+            received.append((event_type, content))
+
+        fake_user_msg = MagicMock()
+        fake_user_msg.__class__.__name__ = "UserMessage"
+        fake_user_msg.content = ""  # empty — should not forward
+
+        fake_result_msg = MagicMock()
+        fake_result_msg.__class__.__name__ = "ResultMessage"
+        fake_result_msg.result = "done"
+        fake_result_msg.session_id = "s1"
+        fake_result_msg.total_cost_usd = 0.0
+
+        mock_query = AsyncMock()
+        mock_query.receive_messages = MagicMock(
+            return_value=_async_iter([fake_user_msg, fake_result_msg])
+        )
+
+        mock_sdk = AsyncMock()
+        mock_sdk._query = mock_query
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[object] = loop.create_future()
+        item = WorkItem(prompt="hello", future=future, on_stream=on_stream)
+
+        client = UserClient(user_id=1, directory="/dir")
+        client._sdk_client = mock_sdk  # type: ignore[assignment]
+        client._querying = False
+
+        with patch(
+            "src.claude.user_client.parse_message", side_effect=lambda m: m
+        ):
+            await client._process_item(item)
+
+        assert received == []
+
+
+def _async_iter(items: list[object]):  # type: ignore[return]
+    """Return an async iterable over a list."""
+
+    async def _gen() -> object:
+        for item in items:
+            yield item
+
+    return _gen()
+
+
 class TestQueryResult:
     def test_query_result_creation(self) -> None:
         result = QueryResult(

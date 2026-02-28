@@ -250,6 +250,8 @@ class UserClient:
                         )
                 elif event.type == "thinking" and event.content and item.on_stream:
                     await item.on_stream(event.type, event.content)
+                elif event.type == "user" and event.content and item.on_stream:
+                    await item.on_stream("tool_result", event.content)
 
                 if isinstance(message, ResultMessage):
                     break

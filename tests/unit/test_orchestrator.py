@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.bot.orchestrator import MessageOrchestrator, _redact_secrets
+from src.bot.orchestrator import MessageOrchestrator
+from src.bot.progress import redact_secrets as _redact_secrets
 from src.config import create_test_config
 
 
@@ -82,7 +83,7 @@ def deps():
 
 
 def test_agentic_registers_commands(agentic_settings, deps):
-    """Agentic mode registers start, new, interrupt, status, verbose, compact, model, repo, resume, commands."""
+    """Agentic mode registers start, new, interrupt, status, compact, model, repo, resume, commands."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     app = MagicMock()
     app.add_handler = MagicMock()
@@ -99,12 +100,11 @@ def test_agentic_registers_commands(agentic_settings, deps):
     ]
     commands = [h[0][0].commands for h in cmd_handlers]
 
-    assert len(cmd_handlers) == 10
+    assert len(cmd_handlers) == 9
     assert frozenset({"start"}) in commands
     assert frozenset({"new"}) in commands
     assert frozenset({"interrupt"}) in commands
     assert frozenset({"status"}) in commands
-    assert frozenset({"verbose"}) in commands
     assert frozenset({"compact"}) in commands
     assert frozenset({"model"}) in commands
     assert frozenset({"repo"}) in commands
@@ -159,18 +159,17 @@ def test_agentic_registers_text_document_photo_handlers(agentic_settings, deps):
 
 
 async def test_agentic_bot_commands(agentic_settings, deps):
-    """Agentic mode returns 10 bot commands."""
+    """Agentic mode returns 9 bot commands."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     commands = await orchestrator.get_bot_commands()
 
-    assert len(commands) == 10
+    assert len(commands) == 9
     cmd_names = [c.command for c in commands]
     assert cmd_names == [
         "start",
         "new",
         "interrupt",
         "status",
-        "verbose",
         "compact",
         "model",
         "repo",
@@ -335,7 +334,6 @@ async def test_agentic_text_calls_claude(agentic_settings, deps):
 
     # Progress message mock
     progress_msg = AsyncMock()
-    progress_msg.delete = AsyncMock()
     update.message.reply_text.return_value = progress_msg
 
     context = MagicMock()
@@ -355,8 +353,8 @@ async def test_agentic_text_calls_claude(agentic_settings, deps):
     # Session ID updated
     assert context.user_data["claude_session_id"] == "session-abc"
 
-    # Progress message deleted
-    progress_msg.delete.assert_called_once()
+    # Progress message finalized (edit_text called with done=True header)
+    progress_msg.edit_text.assert_called()
 
     # Response sent without keyboard (reply_markup=None)
     response_calls = [
@@ -448,7 +446,6 @@ async def test_agentic_text_logs_failure_on_error(agentic_settings, deps):
     update.message.reply_text = AsyncMock()
 
     progress_msg = AsyncMock()
-    progress_msg.delete = AsyncMock()
     update.message.reply_text.return_value = progress_msg
 
     context = MagicMock()
@@ -528,9 +525,10 @@ class TestRedactSecrets:
         assert "secret_password" not in result
 
     def test_summarize_tool_input_bash_redacts(self, agentic_settings, deps):
-        """_summarize_tool_input applies redaction to Bash commands."""
-        orchestrator = MessageOrchestrator(agentic_settings, deps)
-        result = orchestrator._summarize_tool_input(
+        """summarize_tool_input applies redaction to Bash commands."""
+        from src.bot.progress import summarize_tool_input
+
+        result = summarize_tool_input(
             "Bash",
             {"command": "curl --token=mysupersecrettoken123 https://api.example.com"},
         )
@@ -539,10 +537,9 @@ class TestRedactSecrets:
 
     def test_summarize_tool_input_non_bash_unchanged(self, agentic_settings, deps):
         """Non-Bash tools don't go through redaction."""
-        orchestrator = MessageOrchestrator(agentic_settings, deps)
-        result = orchestrator._summarize_tool_input(
-            "Read", {"file_path": "/home/user/.env"}
-        )
+        from src.bot.progress import summarize_tool_input
+
+        result = summarize_tool_input("Read", {"file_path": "/home/user/.env"})
         assert result == ".env"
 
 
@@ -614,23 +611,22 @@ class TestTypingHeartbeat:
 
     async def test_stream_callback_independent_of_typing(self, agentic_settings, deps):
         """Stream callback no longer sends typing — that's the heartbeat's job."""
-        orchestrator = MessageOrchestrator(agentic_settings, deps)
+        from src.bot.progress import ProgressMessageManager, build_stream_callback
 
         progress_msg = AsyncMock()
-        tool_log: list = []  # type: ignore[type-arg]
-        callback = orchestrator._make_stream_callback(
-            verbose_level=1,
-            progress_msg=progress_msg,
-            tool_log=tool_log,
-            start_time=0.0,
+        import time
+
+        manager = ProgressMessageManager(
+            initial_message=progress_msg, start_time=time.time()
         )
+        callback = build_stream_callback(manager)
         assert callback is not None
 
         # Verify the callback signature doesn't accept a 'chat' parameter
         # (typing is no longer handled by the stream callback)
         import inspect
 
-        sig = inspect.signature(orchestrator._make_stream_callback)
+        sig = inspect.signature(build_stream_callback)
         assert "chat" not in sig.parameters
 
 

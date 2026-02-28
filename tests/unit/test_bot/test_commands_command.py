@@ -18,7 +18,6 @@ def mock_settings():
     settings.approved_directory = Path("/test/workspace")
     settings.agentic_mode = True
     settings.enable_project_threads = False
-    settings.verbose_level = 1
     return settings
 
 
@@ -152,16 +151,14 @@ async def test_skill_text_passthrough(orchestrator, mock_update, mock_context):
         mock_formatter.format_claude_response.return_value = [mock_formatted_msg]
         mock_formatter_class.return_value = mock_formatter
 
-        with patch.object(orchestrator, "_make_stream_callback", return_value=AsyncMock()):
-            with patch.object(orchestrator, "_start_typing_heartbeat") as mock_heartbeat:
-                mock_heartbeat.return_value = MagicMock()
-                with patch.object(orchestrator, "_get_verbose_level", return_value=1):
-                    mock_update.message.reply_text.return_value = MagicMock(
-                        delete=AsyncMock()
-                    )
-                    with patch.object(orchestrator, "_run_claude_query") as mock_query:
-                        mock_query.return_value = mock_claude_response
-                        await orchestrator.agentic_text(mock_update, mock_context)
+        with patch.object(orchestrator, "_start_typing_heartbeat") as mock_heartbeat:
+            mock_heartbeat.return_value = MagicMock()
+            mock_update.message.reply_text.return_value = MagicMock(
+                edit_text=AsyncMock()
+            )
+            with patch.object(orchestrator, "_run_claude_query") as mock_query:
+                mock_query.return_value = mock_claude_response
+                await orchestrator.agentic_text(mock_update, mock_context)
 
     # Verify prompt is passed verbatim — no <skill-invocation> wrapping
     mock_query.assert_called_once()
@@ -228,16 +225,14 @@ async def test_skill_callback_passthrough(orchestrator, mock_context):
         mock_formatter.format_claude_response.return_value = [mock_formatted_msg]
         mock_formatter_class.return_value = mock_formatter
 
-        with patch.object(orchestrator, "_make_stream_callback", return_value=AsyncMock()):
-            with patch.object(orchestrator, "_start_typing_heartbeat") as mock_heartbeat:
-                mock_heartbeat.return_value = MagicMock()
-                with patch.object(orchestrator, "_get_verbose_level", return_value=1):
-                    mock_query.message.reply_text.return_value = MagicMock(
-                        delete=AsyncMock()
-                    )
-                    with patch.object(orchestrator, "_run_claude_query") as mock_run:
-                        mock_run.return_value = mock_claude_response
-                        await orchestrator._agentic_callback(mock_update, mock_context)
+        with patch.object(orchestrator, "_start_typing_heartbeat") as mock_heartbeat:
+            mock_heartbeat.return_value = MagicMock()
+            mock_query.message.reply_text.return_value = MagicMock(
+                edit_text=AsyncMock()
+            )
+            with patch.object(orchestrator, "_run_claude_query") as mock_run:
+                mock_run.return_value = mock_claude_response
+                await orchestrator._agentic_callback(mock_update, mock_context)
 
     # Verify prompt passed verbatim as /skill_name
     mock_run.assert_called_once()

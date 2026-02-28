@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Telegram bot providing remote access to Claude Code. Python 3.10+, built with uv, using `python-telegram-bot` for Telegram and `claude-agent-sdk` for Claude Code integration.
+Telegram bot providing remote access to Claude Code. Python 3.12+, built with uv, using `python-telegram-bot` for Telegram and `claude-agent-sdk` for Claude Code integration.
 
 ## Commands
 
@@ -33,12 +33,13 @@ uv run mypy src
 - `ClientManager` (`src/claude/client_manager.py`) — Manages persistent per-user `UserClient` actors with automatic session resolution. Actors self-remove on idle timeout via `on_exit` callback.
 - `UserClient` (`src/claude/user_client.py`) — Actor-based Claude SDK client for one user. A long-lived asyncio task owns the full `connect → query → disconnect` lifecycle in a single task (required by the SDK's anyio cancel scopes). Public API: `start()`, `submit()`, `stop()`, `interrupt()`. Idle timeout built into the worker's `queue.get()`.
 - `OptionsBuilder` (`src/claude/options.py`) — Builds `ClaudeAgentOptions` from CLI settings (`~/.claude/settings.json`) with full feature parity: model selection, system prompt, permission mode, tool monitoring via `can_use_tool`, and `CLAUDECODE` env clearing.
-- `StreamHandler` (`src/claude/stream_handler.py`) — Extracts structured `StreamEvent`s from SDK messages (`ResultMessage`, `AssistantMessage`, `StreamEvent` partials) for real-time progress display.
+- `StreamHandler` (`src/claude/stream_handler.py`) — Extracts structured `StreamEvent`s from SDK messages (`ResultMessage`, `AssistantMessage`, `StreamEvent` partials).
+- `ProgressMessageManager` (`src/bot/progress.py`) — Rich progress display for Telegram. Maintains a persistent activity log message showing tool calls, thinking indicators, and reasoning snippets in real-time.
 - `SessionResolver` (`src/claude/session.py`) — Resolves session IDs from Claude CLI's `~/.claude/history.jsonl`, keyed by user+directory.
 
 **Classic mode** still uses `ClaudeIntegration` (facade in `src/claude/facade.py`) wrapping `ClaudeSDKManager` (`src/claude/sdk_integration.py`).
 
-Session lifecycle follows CLI conventions: `/repo` switches directories (like `cd`), `/new` eagerly initializes a fresh session, `/resume` shows a session picker (like `claude --resume`). Sending a message without an active session triggers an implicit `/new`. Real-time streaming enabled via `include_partial_messages=True`. Native skill/plugin discovery via `tools={"type": "preset", "preset": "claude_code"}` and `setting_sources=["user", "project"]`.
+Sessions auto-resume: per user+directory, read from Claude CLI's `~/.claude/history.jsonl`. Real-time streaming enabled via `include_partial_messages=True`. Native skill/plugin pass-through via `tools={"type": "preset", "preset": "claude_code"}` and `setting_sources=["user", "project"]`.
 
 ### Request Flow
 
@@ -48,11 +49,11 @@ Session lifecycle follows CLI conventions: `/repo` switches directories (like `c
 Telegram message -> Security middleware (group -3) -> Auth middleware (group -2)
 -> MessageOrchestrator.agentic_text() (group 10)
 -> ClientManager.get_or_connect() -> UserClient.submit() -> actor processes query
--> StreamHandler extracts events inside actor -> Real-time progress via callback
+-> StreamHandler extracts events inside actor -> ProgressMessageManager renders real-time activity log
 -> Final response stored in SQLite -> Sent back to Telegram
 ```
 
-Unrecognized `/commands` are routed to skill lookup (exact match -> prefix match) and passed to Claude with `<skill-invocation>` framing.
+Unrecognized `/commands` are passed through to the Claude SDK as skill invocations via native tool preset.
 
 **External triggers** (webhooks, scheduler):
 
@@ -84,9 +85,8 @@ context.bot_data["security_validator"]
 - `src/bot/features/` -- Git integration, file handling, quick actions, session export
 - `src/bot/orchestrator.py` -- MessageOrchestrator: routes to agentic or classic handlers, project-topic routing
 - `src/claude/` -- Claude integration: `client_manager.py` (per-user clients), `user_client.py` (SDK wrapper), `options.py` (SDK options builder), `stream_handler.py` (message parsing), `session.py` (session resolver), `monitor.py` (tool monitoring), `facade.py` (classic mode)
-- `src/skills/` -- Skill/plugin discovery from `installed_plugins.json`, prefix matching, namespace resolution
 - `src/projects/` -- Multi-project support: `registry.py` (YAML project config), `thread_manager.py` (Telegram topic sync/routing)
-- `src/storage/` -- SQLite via aiosqlite (pysqlite3 for modern features), repository pattern (users, audit_log, project_threads, bot_sessions). The `__init__.py` patches `sys.modules["sqlite3"]` before any submodule imports aiosqlite.
+- `src/storage/` -- SQLite via aiosqlite, repository pattern (users, sessions, messages, tool_usage, audit_log, project_threads, bot_sessions)
 - `src/security/` -- Multi-provider auth (whitelist + token), input validators (with optional `disable_security_patterns`), audit logging
 - `src/events/` -- EventBus (async pub/sub), event types, AgentHandler, EventSecurityMiddleware
 - `src/api/` -- FastAPI webhook server, GitHub HMAC-SHA256 + Bearer token auth
@@ -113,8 +113,6 @@ Security relaxation (trusted environments only): `DISABLE_SECURITY_PATTERNS` (de
 
 Multi-project topics: `ENABLE_PROJECT_THREADS` (default false), `PROJECT_THREADS_MODE` (`private`|`group`), `PROJECT_THREADS_CHAT_ID` (required for group mode), `PROJECTS_CONFIG_PATH` (path to YAML project registry), `PROJECT_THREADS_SYNC_ACTION_INTERVAL_SECONDS` (default `1.1`, set `0` to disable pacing). See `config/projects.example.yaml`.
 
-Output verbosity: `VERBOSE_LEVEL` (default 1, range 0-2). Controls how much of Claude's background activity is shown to the user in real-time. 0 = quiet (only final response, typing indicator still active), 1 = normal (tool names + reasoning snippets shown during execution), 2 = detailed (tool names with input summaries + longer reasoning text). Users can override per-session via `/verbose 0|1|2`. A persistent typing indicator is refreshed every ~2 seconds at all levels.
-
 Feature flags in `src/config/features.py` control: MCP, git integration, file uploads, quick actions, session export, image uploads, conversation mode, agentic mode, API server, scheduler.
 
 ### DateTime Convention
@@ -133,7 +131,7 @@ All datetimes use timezone-aware UTC: `datetime.now(UTC)` (not `datetime.utcnow(
 
 ### Agentic mode
 
-Agentic mode commands: `/start`, `/new`, `/resume`, `/status`, `/verbose`, `/repo`, `/interrupt`, `/model`. Unrecognized `/commands` are routed to skill lookup. If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`. To add a new command:
+Agentic mode commands: `/start`, `/new`, `/interrupt`, `/status`, `/compact`, `/model`, `/repo`, `/resume`, `/commands`. Unrecognized `/commands` are passed through to Claude as skill invocations. If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`. To add a new command:
 
 1. Add handler function in `src/bot/orchestrator.py`
 2. Register in `MessageOrchestrator._register_agentic_handlers()`

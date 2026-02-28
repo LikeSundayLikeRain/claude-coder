@@ -10,7 +10,7 @@ A Telegram bot that gives you remote access to [Claude Code](https://claude.ai/c
 This bot connects Telegram to Claude Code, providing a conversational AI interface for your codebase:
 
 - **Chat naturally** -- ask Claude to analyze, edit, or explain your code in plain language
-- **Maintain context** across conversations -- `/resume` picks up where you left off, just like `claude --resume`
+- **Maintain context** across conversations with automatic session persistence per project
 - **Code on the go** from any device with Telegram
 - **Receive proactive notifications** from webhooks, scheduled jobs, and CI/CD events
 - **Stay secure** with built-in authentication, directory sandboxing, and audit logging
@@ -99,7 +99,7 @@ The bot supports two interaction modes:
 
 The default conversational mode. Just talk to Claude naturally -- no special commands required.
 
-**Commands:** `/start`, `/new`, `/resume`, `/status`, `/verbose`, `/repo`
+**Commands:** `/start`, `/new`, `/interrupt`, `/status`, `/compact`, `/model`, `/repo`, `/resume`, `/commands`
 If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`
 
 ```
@@ -118,17 +118,11 @@ Bot: Working... (8s)
      💻 Bash: uv run pytest tests/ -v
 Bot: [Claude shows the changes and test results]
 
-You: /verbose 0
-Bot: Verbosity set to 0 (quiet)
+You: /compact
+Bot: Context compressed — session continues.
 ```
 
-Use `/verbose 0|1|2` to control how much background activity is shown:
-
-| Level | Shows |
-|-------|-------|
-| **0** (quiet) | Final response only (typing indicator stays active) |
-| **1** (normal, default) | Tool names + reasoning snippets in real-time |
-| **2** (detailed) | Tool names with inputs + longer reasoning text |
+Use `/compact` to compress the conversation context while keeping session continuity (useful for long conversations approaching context limits).
 
 #### GitHub Workflow
 
@@ -152,7 +146,7 @@ You: Create a fix branch and push it
 Bot: [Claude creates branch, commits, pushes]
 ```
 
-Use `/repo` to browse and switch directories (like `cd`). Use `/new` to start a fresh session or `/resume` to pick up a previous one.
+Use `/repo` to list cloned repos in your workspace, or `/repo <name>` to switch directories (sessions auto-resume).
 
 ### Classic Mode
 
@@ -204,7 +198,7 @@ Enable with `ENABLE_API_SERVER=true` and `ENABLE_SCHEDULER=true`. See [docs/setu
 - Job scheduler with cron expressions and persistent storage
 - Notification service with per-chat rate limiting
 
-- Tunable verbose output showing Claude's tool usage and reasoning in real-time
+- Rich progress display showing tool calls, reasoning snippets, and thinking indicators in real-time
 - Persistent typing indicator so users always know the bot is working
 - 16 configurable tools with allowlist/disallowlist control (see [docs/tools.md](docs/tools.md))
 
@@ -232,8 +226,6 @@ CLAUDE_TIMEOUT_SECONDS=300       # Operation timeout
 
 # Mode
 AGENTIC_MODE=true                # Agentic (default) or classic mode
-VERBOSE_LEVEL=1                  # 0=quiet, 1=normal (default), 2=detailed
-
 # Features (classic mode)
 ENABLE_GIT_INTEGRATION=true
 ENABLE_FILE_UPLOADS=true

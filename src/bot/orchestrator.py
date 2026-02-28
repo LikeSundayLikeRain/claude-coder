@@ -6,7 +6,6 @@ classic mode, delegates to existing full-featured handlers.
 """
 
 import asyncio
-import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -33,6 +32,7 @@ from ..claude.history import (
 )
 from ..config.settings import Settings
 from ..projects import PrivateTopicsUnavailableError
+from .progress import ProgressMessageManager, build_stream_callback
 from .utils.html_format import escape_html
 from .utils.repo_browser import (
     build_browse_header,
@@ -44,73 +44,6 @@ from .utils.repo_browser import (
 from .utils.time_format import relative_time
 
 logger = structlog.get_logger()
-
-# Patterns that look like secrets/credentials in CLI arguments
-_SECRET_PATTERNS: List[re.Pattern[str]] = [
-    # API keys / tokens (sk-ant-..., sk-..., ghp_..., gho_..., github_pat_..., xoxb-...)
-    re.compile(
-        r"(sk-ant-api\d*-[A-Za-z0-9_-]{10})[A-Za-z0-9_-]*"
-        r"|(sk-[A-Za-z0-9_-]{20})[A-Za-z0-9_-]*"
-        r"|(ghp_[A-Za-z0-9]{5})[A-Za-z0-9]*"
-        r"|(gho_[A-Za-z0-9]{5})[A-Za-z0-9]*"
-        r"|(github_pat_[A-Za-z0-9_]{5})[A-Za-z0-9_]*"
-        r"|(xoxb-[A-Za-z0-9]{5})[A-Za-z0-9-]*"
-    ),
-    # AWS access keys
-    re.compile(r"(AKIA[0-9A-Z]{4})[0-9A-Z]{12}"),
-    # Generic long hex/base64 tokens after common flags/env patterns
-    re.compile(
-        r"((?:--token|--secret|--password|--api-key|--apikey|--auth)"
-        r"[= ]+)['\"]?[A-Za-z0-9+/_.:-]{8,}['\"]?"
-    ),
-    # Inline env assignments like KEY=value
-    re.compile(
-        r"((?:TOKEN|SECRET|PASSWORD|API_KEY|APIKEY|AUTH_TOKEN|PRIVATE_KEY"
-        r"|ACCESS_KEY|CLIENT_SECRET|WEBHOOK_SECRET)"
-        r"=)['\"]?[^\s'\"]{8,}['\"]?"
-    ),
-    # Bearer / Basic auth headers
-    re.compile(r"(Bearer )[A-Za-z0-9+/_.:-]{8,}" r"|(Basic )[A-Za-z0-9+/=]{8,}"),
-    # Connection strings with credentials  user:pass@host
-    re.compile(r"://([^:]+:)[^@]{4,}(@)"),
-]
-
-
-def _redact_secrets(text: str) -> str:
-    """Replace likely secrets/credentials with redacted placeholders."""
-    result = text
-    for pattern in _SECRET_PATTERNS:
-        result = pattern.sub(
-            lambda m: next((g + "***" for g in m.groups() if g is not None), "***"),
-            result,
-        )
-    return result
-
-
-# Tool name -> friendly emoji mapping for verbose output
-_TOOL_ICONS: Dict[str, str] = {
-    "Read": "\U0001f4d6",
-    "Write": "\u270f\ufe0f",
-    "Edit": "\u270f\ufe0f",
-    "MultiEdit": "\u270f\ufe0f",
-    "Bash": "\U0001f4bb",
-    "Glob": "\U0001f50d",
-    "Grep": "\U0001f50d",
-    "LS": "\U0001f4c2",
-    "Task": "\U0001f9e0",
-    "TaskOutput": "\U0001f9e0",
-    "WebFetch": "\U0001f310",
-    "WebSearch": "\U0001f310",
-    "NotebookRead": "\U0001f4d3",
-    "NotebookEdit": "\U0001f4d3",
-    "TodoRead": "\u2611\ufe0f",
-    "TodoWrite": "\u2611\ufe0f",
-}
-
-
-def _tool_icon(name: str) -> str:
-    """Return emoji for a tool, with a default wrench."""
-    return _TOOL_ICONS.get(name, "\U0001f527")
 
 
 class MessageOrchestrator:
@@ -305,7 +238,6 @@ class MessageOrchestrator:
             ("new", self.agentic_new),
             ("interrupt", self.handle_interrupt),
             ("status", self.agentic_status),
-            ("verbose", self.agentic_verbose),
             ("compact", self.agentic_compact),
             ("model", self.handle_model),
             ("repo", self.agentic_repo),
@@ -417,7 +349,6 @@ class MessageOrchestrator:
                 BotCommand("new", "Start a fresh session"),
                 BotCommand("interrupt", "Interrupt running query"),
                 BotCommand("status", "Show session status"),
-                BotCommand("verbose", "Set output verbosity (0/1/2)"),
                 BotCommand("compact", "Compress context, keep continuity"),
                 BotCommand("model", "Switch Claude model"),
                 BotCommand("repo", "List repos / switch workspace"),
@@ -576,8 +507,7 @@ class MessageOrchestrator:
             f"/resume — Pick a session to resume\n"
             f"/commands — Browse available skills\n"
             f"/compact — Compress context\n"
-            f"/repo — Switch workspace\n"
-            f"/verbose — Set output level (0/1/2)"
+            f"/repo — Switch workspace"
             f"{sync_line}",
             parse_mode="HTML",
         )
@@ -722,48 +652,6 @@ class MessageOrchestrator:
             parse_mode="HTML",
         )
 
-    def _get_verbose_level(self, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Return effective verbose level: per-user override or global default."""
-        user_override = context.user_data.get("verbose_level")
-        if user_override is not None:
-            return int(user_override)
-        return self.settings.verbose_level
-
-    async def agentic_verbose(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Set output verbosity: /verbose [0|1|2]."""
-        args = update.message.text.split()[1:] if update.message.text else []
-        if not args:
-            current = self._get_verbose_level(context)
-            labels = {0: "quiet", 1: "normal", 2: "detailed"}
-            await update.message.reply_text(
-                f"Verbosity: <b>{current}</b> ({labels.get(current, '?')})\n\n"
-                "Usage: <code>/verbose 0|1|2</code>\n"
-                "  0 = quiet (final response only)\n"
-                "  1 = normal (tools + reasoning)\n"
-                "  2 = detailed (tools with inputs + reasoning)",
-                parse_mode="HTML",
-            )
-            return
-
-        try:
-            level = int(args[0])
-            if level not in (0, 1, 2):
-                raise ValueError
-        except ValueError:
-            await update.message.reply_text(
-                "Please use: /verbose 0, /verbose 1, or /verbose 2"
-            )
-            return
-
-        context.user_data["verbose_level"] = level
-        labels = {0: "quiet", 1: "normal", 2: "detailed"}
-        await update.message.reply_text(
-            f"Verbosity set to <b>{level}</b> ({labels[level]})",
-            parse_mode="HTML",
-        )
-
     async def agentic_compact(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -867,80 +755,6 @@ class MessageOrchestrator:
         finally:
             heartbeat.cancel()
 
-    def _format_verbose_progress(
-        self,
-        activity_log: List[Dict[str, Any]],
-        verbose_level: int,
-        start_time: float,
-    ) -> str:
-        """Build the progress message text based on activity so far."""
-        if not activity_log:
-            return "Working..."
-
-        elapsed = time.time() - start_time
-        lines: List[str] = [f"Working... ({elapsed:.0f}s)\n"]
-
-        # Show tool entries + only the most recent text entry
-        max_entries = 15
-        recent = activity_log[-max_entries:]
-        for entry in recent:
-            kind = entry.get("kind", "tool")
-            if kind == "text":
-                # Claude's accumulated reasoning — show one clean line
-                snippet = entry.get("detail", "").strip()
-                if not snippet:
-                    continue
-                # Take first meaningful line, truncate
-                first_line = snippet.split("\n", 1)[0].strip()
-                if verbose_level >= 2:
-                    lines.append(f"\U0001f4ac {first_line[:150]}")
-                else:
-                    lines.append(f"\U0001f4ac {first_line[:80]}")
-            else:
-                # Tool call
-                icon = _tool_icon(entry["name"])
-                if verbose_level >= 2 and entry.get("detail"):
-                    lines.append(f"{icon} {entry['name']}: {entry['detail']}")
-                else:
-                    lines.append(f"{icon} {entry['name']}")
-
-        if len(activity_log) > max_entries:
-            lines.insert(
-                1, f"... ({len(activity_log) - max_entries} earlier entries)\n"
-            )
-
-        return "\n".join(lines)
-
-    @staticmethod
-    def _summarize_tool_input(tool_name: str, tool_input: Dict[str, Any]) -> str:
-        """Return a short summary of tool input for verbose level 2."""
-        if not tool_input:
-            return ""
-        if tool_name in ("Read", "Write", "Edit", "MultiEdit"):
-            path = tool_input.get("file_path") or tool_input.get("path", "")
-            if path:
-                # Show just the filename, not the full path
-                return path.rsplit("/", 1)[-1]
-        if tool_name in ("Glob", "Grep"):
-            pattern = tool_input.get("pattern", "")
-            if pattern:
-                return pattern[:60]
-        if tool_name == "Bash":
-            cmd = tool_input.get("command", "")
-            if cmd:
-                return _redact_secrets(cmd[:100])[:80]
-        if tool_name in ("WebFetch", "WebSearch"):
-            return (tool_input.get("url", "") or tool_input.get("query", ""))[:60]
-        if tool_name == "Task":
-            desc = tool_input.get("description", "")
-            if desc:
-                return desc[:60]
-        # Generic: show first key's value
-        for v in tool_input.values():
-            if isinstance(v, str) and v:
-                return v[:60]
-        return ""
-
     async def _run_claude_query(
         self,
         prompt: str,
@@ -1027,59 +841,6 @@ class MessageOrchestrator:
 
         return asyncio.create_task(_heartbeat())
 
-    def _make_stream_callback(
-        self,
-        verbose_level: int,
-        progress_msg: Any,
-        tool_log: List[Dict[str, Any]],
-        start_time: float,
-    ) -> Optional[Callable[..., Any]]:
-        """Create a stream callback for verbose progress updates.
-
-        Returns None when verbose_level is 0 (nothing to display).
-        Typing indicators are handled by a separate heartbeat task.
-
-        The callback signature matches UserClient._process_item:
-        on_stream(event_type: str, content: Any)
-        """
-        if verbose_level == 0:
-            return None
-
-        last_edit_time = [0.0]  # mutable container for closure
-
-        async def _on_stream(event_type: str, content: Any) -> None:
-            # Capture tool calls
-            if event_type == "tool_use" and isinstance(content, dict):
-                name = content.get("name", "unknown")
-                detail = self._summarize_tool_input(name, content.get("input", {}))
-                tool_log.append({"kind": "tool", "name": name, "detail": detail})
-
-            # Capture assistant text (reasoning / commentary)
-            # Accumulate consecutive text deltas into a single entry
-            # to avoid flooding the progress display with word fragments.
-            if event_type in ("text", "thinking") and content:
-                text = str(content)
-                if text and verbose_level >= 1:
-                    # Append to last text entry if it exists, else create new
-                    if tool_log and tool_log[-1].get("kind") == "text":
-                        tool_log[-1]["detail"] = (tool_log[-1]["detail"] + text)[:200]
-                    else:
-                        tool_log.append({"kind": "text", "detail": text[:200]})
-
-            # Throttle progress message edits to avoid Telegram rate limits
-            now = time.time()
-            if (now - last_edit_time[0]) >= 2.0 and tool_log:
-                last_edit_time[0] = now
-                new_text = self._format_verbose_progress(
-                    tool_log, verbose_level, start_time
-                )
-                try:
-                    await progress_msg.edit_text(new_text)
-                except Exception:
-                    pass
-
-        return _on_stream
-
     async def agentic_text(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1106,7 +867,6 @@ class MessageOrchestrator:
                     "new",
                     "interrupt",
                     "status",
-                    "verbose",
                     "compact",
                     "model",
                     "repo",
@@ -1172,8 +932,12 @@ class MessageOrchestrator:
         chat = update.message.chat
         await chat.send_action("typing")
 
-        verbose_level = self._get_verbose_level(context)
         progress_msg = await update.message.reply_text("Working...")
+        start_time = time.time()
+        progress_manager = ProgressMessageManager(
+            initial_message=progress_msg, start_time=start_time
+        )
+        on_stream = build_stream_callback(progress_manager)
 
         current_dir = context.user_data.get(
             "current_directory", self.settings.approved_directories[0]
@@ -1186,13 +950,6 @@ class MessageOrchestrator:
         # Implicit /new: if no session is set (e.g. after /repo), start fresh
         if not force_new and session_id is None:
             force_new = True
-
-        # --- Verbose progress tracking via stream callback ---
-        tool_log: List[Dict[str, Any]] = []
-        start_time = time.time()
-        on_stream = self._make_stream_callback(
-            verbose_level, progress_msg, tool_log, start_time
-        )
 
         # Independent typing heartbeat — stays alive even with no stream events
         heartbeat = self._start_typing_heartbeat(chat)
@@ -1256,7 +1013,7 @@ class MessageOrchestrator:
         finally:
             heartbeat.cancel()
 
-        await progress_msg.delete()
+        await progress_manager.finalize()
 
         for i, message in enumerate(formatted_messages):
             if not message.text or not message.text.strip():
@@ -1266,7 +1023,6 @@ class MessageOrchestrator:
                     message.text,
                     parse_mode=message.parse_mode,
                     reply_markup=None,  # No keyboards in agentic mode
-                    reply_to_message_id=(update.message.message_id if i == 0 else None),
                 )
                 if i < len(formatted_messages) - 1:
                     await asyncio.sleep(0.5)
@@ -1280,18 +1036,12 @@ class MessageOrchestrator:
                     await update.message.reply_text(
                         message.text,
                         reply_markup=None,
-                        reply_to_message_id=(
-                            update.message.message_id if i == 0 else None
-                        ),
                     )
                 except Exception as plain_err:
                     await update.message.reply_text(
                         f"Failed to deliver response "
                         f"(Telegram error: {str(plain_err)[:150]}). "
                         f"Please try again.",
-                        reply_to_message_id=(
-                            update.message.message_id if i == 0 else None
-                        ),
                     )
 
         # Audit log
@@ -1384,11 +1134,11 @@ class MessageOrchestrator:
         if not force_new and session_id is None:
             force_new = True
 
-        verbose_level = self._get_verbose_level(context)
-        tool_log: List[Dict[str, Any]] = []
-        on_stream = self._make_stream_callback(
-            verbose_level, progress_msg, tool_log, time.time()
+        doc_start_time = time.time()
+        doc_progress_manager = ProgressMessageManager(
+            initial_message=progress_msg, start_time=doc_start_time
         )
+        on_stream = build_stream_callback(doc_progress_manager)
 
         heartbeat = self._start_typing_heartbeat(chat)
         try:
@@ -1420,7 +1170,7 @@ class MessageOrchestrator:
                 claude_response.content
             )
 
-            await progress_msg.delete()
+            await doc_progress_manager.finalize()
 
             for i, message in enumerate(formatted_messages):
                 await update.message.reply_text(
@@ -1475,11 +1225,11 @@ class MessageOrchestrator:
             if not force_new and session_id is None:
                 force_new = True
 
-            verbose_level = self._get_verbose_level(context)
-            tool_log: List[Dict[str, Any]] = []
-            on_stream = self._make_stream_callback(
-                verbose_level, progress_msg, tool_log, time.time()
+            photo_start_time = time.time()
+            photo_progress_manager = ProgressMessageManager(
+                initial_message=progress_msg, start_time=photo_start_time
             )
+            on_stream = build_stream_callback(photo_progress_manager)
 
             heartbeat = self._start_typing_heartbeat(chat)
             try:
@@ -1507,7 +1257,7 @@ class MessageOrchestrator:
                 claude_response.content
             )
 
-            await progress_msg.delete()
+            await photo_progress_manager.finalize()
 
             for i, message in enumerate(formatted_messages):
                 await update.message.reply_text(
@@ -1864,15 +1614,13 @@ class MessageOrchestrator:
             if not force_new and session_id is None:
                 force_new = True
 
-            verbose_level = self._get_verbose_level(context)
-            tool_log: List[Dict[str, Any]] = []
-            start_time = time.time()
-
+            skill_start_time = time.time()
             # Create a progress message for stream updates
             progress_msg = await query.message.reply_text("Working...")
-            on_stream = self._make_stream_callback(
-                verbose_level, progress_msg, tool_log, start_time
+            skill_progress_manager = ProgressMessageManager(
+                initial_message=progress_msg, start_time=skill_start_time
             )
+            on_stream = build_stream_callback(skill_progress_manager)
 
             chat = query.message.chat
             heartbeat = self._start_typing_heartbeat(chat)
@@ -1925,7 +1673,7 @@ class MessageOrchestrator:
             finally:
                 heartbeat.cancel()
 
-            await progress_msg.delete()
+            await skill_progress_manager.finalize()
 
             for i, message in enumerate(formatted_messages):
                 if not message.text or not message.text.strip():
