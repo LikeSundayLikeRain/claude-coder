@@ -8,18 +8,11 @@ Features:
 """
 
 import asyncio
-import sys
+import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator, List, Tuple
-
-# Use pysqlite3 for modern SQLite features (3.45+)
-# Must be patched before aiosqlite imports sqlite3
-import pysqlite3
-
-sys.modules["sqlite3"] = pysqlite3
-import sqlite3  # noqa: E402 — now points to pysqlite3
 
 import aiosqlite
 import structlog

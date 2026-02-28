@@ -90,7 +90,7 @@ class UserRepository:
         """Get list of allowed user IDs."""
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
-                "SELECT user_id FROM users WHERE is_allowed = TRUE"
+                "SELECT user_id FROM users WHERE is_allowed = 1"
             )
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
@@ -128,7 +128,7 @@ class ProjectThreadRepository:
             cursor = await conn.execute(
                 """
                 SELECT * FROM project_threads
-                WHERE chat_id = ? AND message_thread_id = ? AND is_active = TRUE
+                WHERE chat_id = ? AND message_thread_id = ? AND is_active = 1
             """,
                 (chat_id, message_thread_id),
             )
@@ -191,10 +191,10 @@ class ProjectThreadRepository:
                 placeholders = ",".join("?" for _ in active_project_slugs)
                 query = f"""
                     UPDATE project_threads
-                    SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
+                    SET is_active = 0, updated_at = CURRENT_TIMESTAMP
                     WHERE chat_id = ?
                       AND project_slug NOT IN ({placeholders})
-                      AND is_active = TRUE
+                      AND is_active = 1
                 """
                 params = [chat_id] + active_project_slugs
                 cursor = await conn.execute(query, params)
@@ -202,8 +202,8 @@ class ProjectThreadRepository:
                 cursor = await conn.execute(
                     """
                     UPDATE project_threads
-                    SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
-                    WHERE chat_id = ? AND is_active = TRUE
+                    SET is_active = 0, updated_at = CURRENT_TIMESTAMP
+                    WHERE chat_id = ? AND is_active = 1
                 """,
                     (chat_id,),
                 )
@@ -220,7 +220,7 @@ class ProjectThreadRepository:
                 query = f"""
                     SELECT * FROM project_threads
                     WHERE chat_id = ?
-                      AND is_active = TRUE
+                      AND is_active = 1
                       AND project_slug NOT IN ({placeholders})
                     ORDER BY project_slug ASC
                 """
@@ -230,7 +230,7 @@ class ProjectThreadRepository:
                 cursor = await conn.execute(
                     """
                     SELECT * FROM project_threads
-                    WHERE chat_id = ? AND is_active = TRUE
+                    WHERE chat_id = ? AND is_active = 1
                     ORDER BY project_slug ASC
                 """,
                     (chat_id,),
@@ -260,7 +260,7 @@ class ProjectThreadRepository:
             query = "SELECT * FROM project_threads WHERE chat_id = ?"
             params = [chat_id]
             if active_only:
-                query += " AND is_active = TRUE"
+                query += " AND is_active = 1"
             query += " ORDER BY project_slug ASC"
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
