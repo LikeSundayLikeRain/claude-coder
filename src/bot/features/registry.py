@@ -11,9 +11,7 @@ from src.security.validators import SecurityValidator
 from src.storage.facade import Storage
 
 from .conversation_mode import ConversationEnhancer
-from .file_handler import FileHandler
 from .git_integration import GitIntegration
-from .image_handler import ImageHandler
 from .quick_actions import QuickActionManager
 from .session_export import SessionExporter
 
@@ -35,16 +33,6 @@ class FeatureRegistry:
     def _initialize_features(self):
         """Initialize enabled features"""
         logger.info("Initializing bot features")
-
-        # File upload handling - conditionally enabled
-        if self.config.enable_file_uploads:
-            try:
-                self.features["file_handler"] = FileHandler(
-                    config=self.config, security=self.security
-                )
-                logger.info("File handler feature enabled")
-            except Exception as e:
-                logger.error("Failed to initialize file handler", error=str(e))
 
         # Git integration - conditionally enabled
         if self.config.enable_git_integration:
@@ -70,13 +58,6 @@ class FeatureRegistry:
             except Exception as e:
                 logger.error("Failed to initialize session export", error=str(e))
 
-        # Image handling - always enabled
-        try:
-            self.features["image_handler"] = ImageHandler(config=self.config)
-            logger.info("Image handler feature enabled")
-        except Exception as e:
-            logger.error("Failed to initialize image handler", error=str(e))
-
         # Conversation enhancements - skip in agentic mode
         if not self.config.agentic_mode:
             try:
@@ -98,10 +79,6 @@ class FeatureRegistry:
         """Check if feature is enabled"""
         return feature_name in self.features
 
-    def get_file_handler(self) -> Optional[FileHandler]:
-        """Get file handler feature"""
-        return self.get_feature("file_handler")
-
     def get_git_integration(self) -> Optional[GitIntegration]:
         """Get git integration feature"""
         return self.get_feature("git")
@@ -113,10 +90,6 @@ class FeatureRegistry:
     def get_session_export(self) -> Optional[SessionExporter]:
         """Get session export feature"""
         return self.get_feature("session_export")
-
-    def get_image_handler(self) -> Optional[ImageHandler]:
-        """Get image handler feature"""
-        return self.get_feature("image_handler")
 
     def get_conversation_enhancer(self) -> Optional[ConversationEnhancer]:
         """Get conversation enhancer feature"""

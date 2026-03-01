@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 import structlog
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
 from claude_agent_sdk._errors import MessageParseError
 from claude_agent_sdk._internal.message_parser import parse_message
+
+from src.bot.attachments import Query
 
 from .stream_handler import StreamHandler
 
@@ -21,7 +23,7 @@ logger = structlog.get_logger()
 class WorkItem:
     """A unit of work for the actor's queue."""
 
-    prompt: str
+    query: Query
     future: asyncio.Future[Any]
     on_stream: Optional[Callable[..., Any]] = None
 
@@ -121,7 +123,7 @@ class UserClient:
 
     async def submit(
         self,
-        prompt: str,
+        query: Query,
         on_stream: Optional[Callable[..., Any]] = None,
     ) -> QueryResult:
         """Submit a query and await the result."""
@@ -129,9 +131,7 @@ class UserClient:
             raise RuntimeError("UserClient is not running. Call start() first.")
         loop = asyncio.get_running_loop()
         future: asyncio.Future[QueryResult] = loop.create_future()
-        await self._queue.put(
-            WorkItem(prompt=prompt, on_stream=on_stream, future=future)
-        )
+        await self._queue.put(WorkItem(query=query, on_stream=on_stream, future=future))
         return await future
 
     async def interrupt(self) -> None:
@@ -221,7 +221,16 @@ class UserClient:
             cost = 0.0
             num_turns = 0
 
-            await self._sdk_client.query(item.prompt)  # type: ignore[union-attr]
+            content_blocks = item.query.to_content_blocks()
+
+            async def _prompt_iter() -> AsyncIterator[dict[str, Any]]:
+                yield {
+                    "type": "user",
+                    "message": {"role": "user", "content": content_blocks},
+                    "parent_tool_use_id": None,
+                }
+
+            await self._sdk_client.query(_prompt_iter())  # type: ignore[union-attr]
             async for raw_data in self._sdk_client._query.receive_messages():  # type: ignore[union-attr]
                 try:
                     message = parse_message(raw_data)

@@ -152,8 +152,8 @@ def test_agentic_registers_text_document_photo_handlers(agentic_settings, deps):
         if isinstance(call[0][0], CallbackQueryHandler)
     ]
 
-    # 4 message handlers (text, unrecognized commands, document, photo)
-    assert len(msg_handlers) == 4
+    # 3 message handlers (text, unrecognized commands, combined photo+document)
+    assert len(msg_handlers) == 3
     # 1 callback handler (for cd:, session:, skill:, model: patterns)
     assert len(cb_handlers) == 1
 
@@ -387,24 +387,6 @@ async def test_agentic_callback_scoped_to_cd_pattern(agentic_settings, deps):
     assert cb_handlers[0].pattern is not None
     assert cb_handlers[0].pattern.match("cd:my_project")
 
-
-async def test_agentic_document_rejects_large_files(agentic_settings, deps):
-    """Agentic document handler rejects files over 10MB."""
-    orchestrator = MessageOrchestrator(agentic_settings, deps)
-
-    update = MagicMock()
-    update.effective_user.id = 123
-    update.message.document.file_name = "big.bin"
-    update.message.document.file_size = 20 * 1024 * 1024  # 20MB
-    update.message.reply_text = AsyncMock()
-
-    context = MagicMock()
-    context.bot_data = {"security_validator": None}
-
-    await orchestrator.agentic_document(update, context)
-
-    call_args = update.message.reply_text.call_args
-    assert "too large" in call_args.args[0].lower()
 
 
 async def test_agentic_start_escapes_html_in_name(agentic_settings, deps):

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.bot.attachments import Query
 from src.claude.user_client import QueryResult, UserClient, WorkItem
 
 
@@ -74,9 +75,7 @@ class TestUserClientStartFailure:
         mock_sdk.connect.side_effect = RuntimeError("connection refused")
         mock_options = MagicMock()
 
-        with patch(
-            "src.claude.user_client.ClaudeSDKClient", return_value=mock_sdk
-        ):
+        with patch("src.claude.user_client.ClaudeSDKClient", return_value=mock_sdk):
             client = UserClient(user_id=1, directory="/dir")
             with pytest.raises(RuntimeError, match="connection refused"):
                 await client.start(mock_options)
@@ -119,7 +118,7 @@ class TestUserClientSubmit:
             item.future.set_result(QueryResult(response_text="hello", session_id="s1"))
 
         task = asyncio.create_task(fake_consumer())
-        result = await client.submit("test prompt")
+        result = await client.submit(Query(text="test prompt"))
         assert result.response_text == "hello"
         assert result.session_id == "s1"
         await task
@@ -128,7 +127,7 @@ class TestUserClientSubmit:
     async def test_submit_when_not_running_raises(self) -> None:
         client = UserClient(user_id=1, directory="/dir")
         with pytest.raises(RuntimeError, match="not running"):
-            await client.submit("hello")
+            await client.submit(Query(text="hello"))
 
 
 class TestUserClientInterrupt:
@@ -213,8 +212,8 @@ class TestUserClientOnExit:
 class TestWorkItem:
     def test_work_item_creation(self) -> None:
         future = asyncio.get_event_loop().create_future()
-        item = WorkItem(prompt="hello", future=future)
-        assert item.prompt == "hello"
+        item = WorkItem(query=Query(text="hello"), future=future)
+        assert item.query == Query(text="hello")
         assert item.on_stream is None
         assert item.future is future
 
@@ -224,7 +223,7 @@ class TestWorkItem:
         async def cb(x: object) -> None:
             pass
 
-        item = WorkItem(prompt="hi", on_stream=cb, future=future)
+        item = WorkItem(query=Query(text="hi"), on_stream=cb, future=future)
         assert item.on_stream is cb
 
 
@@ -234,12 +233,22 @@ class TestUserClientSkillsCache:
     @pytest.mark.asyncio
     async def test_available_commands_populated_after_start(self) -> None:
         mock_sdk = AsyncMock()
-        mock_sdk.get_server_info = AsyncMock(return_value={
-            "commands": [
-                {"name": "brainstorm", "description": "Brainstorm ideas", "argumentHint": "<topic>"},
-                {"name": "commit", "description": "Commit changes", "argumentHint": ""},
-            ]
-        })
+        mock_sdk.get_server_info = AsyncMock(
+            return_value={
+                "commands": [
+                    {
+                        "name": "brainstorm",
+                        "description": "Brainstorm ideas",
+                        "argumentHint": "<topic>",
+                    },
+                    {
+                        "name": "commit",
+                        "description": "Commit changes",
+                        "argumentHint": "",
+                    },
+                ]
+            }
+        )
         mock_options = MagicMock()
 
         with patch("src.claude.user_client.ClaudeSDKClient", return_value=mock_sdk):
@@ -264,9 +273,11 @@ class TestUserClientSkillsCache:
     @pytest.mark.asyncio
     async def test_available_commands_cleared_after_stop(self) -> None:
         mock_sdk = AsyncMock()
-        mock_sdk.get_server_info = AsyncMock(return_value={
-            "commands": [{"name": "test", "description": "", "argumentHint": ""}]
-        })
+        mock_sdk.get_server_info = AsyncMock(
+            return_value={
+                "commands": [{"name": "test", "description": "", "argumentHint": ""}]
+            }
+        )
         mock_options = MagicMock()
 
         with patch("src.claude.user_client.ClaudeSDKClient", return_value=mock_sdk):
@@ -323,7 +334,7 @@ class TestProcessItemStreamForwarding:
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[object] = loop.create_future()
-        item = WorkItem(prompt="hello", future=future, on_stream=on_stream)
+        item = WorkItem(query=Query(text="hello"), future=future, on_stream=on_stream)
 
         client = UserClient(user_id=1, directory="/dir")
         client._sdk_client = mock_sdk  # type: ignore[assignment]
@@ -331,9 +342,7 @@ class TestProcessItemStreamForwarding:
 
         # Patch parse_message to return the raw messages as-is (stream_handler
         # dispatches by __class__.__name__, so the mocks already carry the right name)
-        with patch(
-            "src.claude.user_client.parse_message", side_effect=lambda m: m
-        ):
+        with patch("src.claude.user_client.parse_message", side_effect=lambda m: m):
             await client._process_item(item)
 
         assert ("tool_result", "tool output text") in received
@@ -363,15 +372,13 @@ class TestProcessItemStreamForwarding:
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[object] = loop.create_future()
-        item = WorkItem(prompt="hello", future=future, on_stream=None)
+        item = WorkItem(query=Query(text="hello"), future=future, on_stream=None)
 
         client = UserClient(user_id=1, directory="/dir")
         client._sdk_client = mock_sdk  # type: ignore[assignment]
         client._querying = False
 
-        with patch(
-            "src.claude.user_client.parse_message", side_effect=lambda m: m
-        ):
+        with patch("src.claude.user_client.parse_message", side_effect=lambda m: m):
             await client._process_item(item)
 
         # No exception means the branch was safely skipped
@@ -407,15 +414,13 @@ class TestProcessItemStreamForwarding:
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[object] = loop.create_future()
-        item = WorkItem(prompt="hello", future=future, on_stream=on_stream)
+        item = WorkItem(query=Query(text="hello"), future=future, on_stream=on_stream)
 
         client = UserClient(user_id=1, directory="/dir")
         client._sdk_client = mock_sdk  # type: ignore[assignment]
         client._querying = False
 
-        with patch(
-            "src.claude.user_client.parse_message", side_effect=lambda m: m
-        ):
+        with patch("src.claude.user_client.parse_message", side_effect=lambda m: m):
             await client._process_item(item)
 
         assert received == []

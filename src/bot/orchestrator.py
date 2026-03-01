@@ -5,10 +5,12 @@ a minimal conversational interface (3 commands, no inline keyboards). In
 classic mode, delegates to existing full-featured handlers.
 """
 
+from __future__ import annotations
+
 import asyncio
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 import structlog
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -20,6 +22,10 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
+if TYPE_CHECKING:
+    from ..claude.sdk_integration import ClaudeResponse
+    from .attachments import Query
 
 from ..claude.client_manager import ClientManager
 from ..claude.history import (
@@ -52,6 +58,9 @@ class MessageOrchestrator:
     def __init__(self, settings: Settings, deps: Dict[str, Any]):
         self.settings = settings
         self.deps = deps
+        from .attachments import MediaGroupCollector
+
+        self._media_collector = MediaGroupCollector()
 
     def _inject_deps(self, handler: Callable) -> Callable:  # type: ignore[type-arg]
         """Wrap handler to inject dependencies into context.bot_data."""
@@ -269,17 +278,12 @@ class MessageOrchestrator:
             group=10,
         )
 
-        # File uploads -> Claude
+        # File and photo uploads -> Claude
         app.add_handler(
             MessageHandler(
-                filters.Document.ALL, self._inject_deps(self.agentic_document)
+                filters.PHOTO | filters.Document.ALL,
+                self._inject_deps(self.agentic_attachment),
             ),
-            group=10,
-        )
-
-        # Photo uploads -> Claude
-        app.add_handler(
-            MessageHandler(filters.PHOTO, self._inject_deps(self.agentic_photo)),
             group=10,
         )
 
@@ -693,8 +697,10 @@ class MessageOrchestrator:
 
             logger.info("Requesting conversation summary", user_id=user_id)
 
+            from .attachments import Query
+
             summary_response = await self._run_claude_query(
-                prompt=summary_prompt,
+                query=Query(text=summary_prompt),
                 user_id=user_id,
                 current_dir=current_dir,
                 session_id=session_id,
@@ -715,7 +721,7 @@ class MessageOrchestrator:
             logger.info("Creating new session with summary", user_id=user_id)
 
             new_response = await self._run_claude_query(
-                prompt=reseed_prompt,
+                query=Query(text=reseed_prompt),
                 user_id=user_id,
                 current_dir=current_dir,
                 session_id=None,
@@ -757,7 +763,7 @@ class MessageOrchestrator:
 
     async def _run_claude_query(
         self,
-        prompt: str,
+        query: "Query",
         user_id: int,
         current_dir: Any,
         session_id: Optional[str],
@@ -770,7 +776,7 @@ class MessageOrchestrator:
         Returns a ClaudeResponse for compatibility with existing formatting code.
         Falls back to ClaudeIntegration if ClientManager is not available.
         """
-        from ..claude.sdk_integration import ClaudeResponse
+        from ..claude.sdk_integration import ClaudeResponse  # noqa: F811
 
         client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
         if client_manager is None:
@@ -784,7 +790,7 @@ class MessageOrchestrator:
                     "Neither client_manager nor claude_integration available"
                 )
             return await claude_integration.run_command(
-                prompt=prompt,
+                prompt=query.text or "",
                 working_directory=current_dir,
                 user_id=user_id,
                 session_id=session_id,
@@ -803,7 +809,7 @@ class MessageOrchestrator:
             force_new=force_new,
         )
 
-        result = await client.submit(prompt, on_stream=on_stream)
+        result = await client.submit(query, on_stream=on_stream)
 
         if result.session_id:
             await client_manager.update_session_id(user_id, result.session_id)
@@ -841,10 +847,171 @@ class MessageOrchestrator:
 
         return asyncio.create_task(_heartbeat())
 
+    async def _execute_query(
+        self,
+        query: "Query",
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> bool:
+        """Shared query execution: progress, session, Claude call, response.
+
+        Handles steps common to both agentic_text and agentic_attachment:
+        client sync, directory restore, progress message, heartbeat,
+        _run_claude_query, session/history update, response formatting,
+        error handling, and reply delivery.
+
+        Returns True on success, False on error.
+        """
+        from .handlers.message import (
+            _format_error_message,
+            _update_working_directory_from_claude_response,
+        )
+        from .utils.formatting import FormattedMessage, ResponseFormatter
+
+        user_id = update.effective_user.id
+
+        # Sync from active client (e.g. after API-driven /resume)
+        _cm: Optional[ClientManager] = context.bot_data.get("client_manager")
+        if _cm:
+            _active = _cm.get_active_client(user_id)
+            if _active and _active.is_connected:
+                context.user_data["current_directory"] = Path(_active.directory)
+                if _active.session_id:
+                    context.user_data["claude_session_id"] = _active.session_id
+
+        # Restore persisted directory if not already set
+        storage = context.bot_data.get("storage")
+        if not context.user_data.get("current_directory") and storage:
+            persisted_dir = await storage.load_user_directory(user_id)
+            if persisted_dir:
+                persisted_path = Path(persisted_dir)
+                if persisted_path.is_dir() and any(
+                    persisted_path == r or persisted_path.is_relative_to(r)
+                    for r in self.settings.approved_directories
+                ):
+                    context.user_data["current_directory"] = persisted_path
+                    logger.debug(
+                        "Restored user directory from database",
+                        user_id=user_id,
+                        directory=str(persisted_path),
+                    )
+
+        chat = update.message.chat
+        await chat.send_action("typing")
+
+        progress_msg = await update.message.reply_text("Working...")
+        start_time = time.time()
+        progress_manager = ProgressMessageManager(
+            initial_message=progress_msg, start_time=start_time
+        )
+        on_stream = build_stream_callback(progress_manager)
+
+        current_dir = context.user_data.get(
+            "current_directory", self.settings.approved_directories[0]
+        )
+        session_id = context.user_data.get("claude_session_id")
+
+        # Check if /new was used — skip auto-resume for this first message.
+        # Flag is only cleared after a successful run so retries keep the intent.
+        force_new = bool(context.user_data.get("force_new_session"))
+        # Implicit /new: if no session is set (e.g. after /repo), start fresh
+        if not force_new and session_id is None:
+            force_new = True
+
+        # Independent typing heartbeat — stays alive even with no stream events
+        heartbeat = self._start_typing_heartbeat(chat)
+
+        success = True
+        try:
+            claude_response = await self._run_claude_query(
+                query=query,
+                user_id=user_id,
+                current_dir=current_dir,
+                session_id=session_id,
+                force_new=force_new,
+                on_stream=on_stream,
+                context=context,
+            )
+
+            # New session created successfully — clear the one-shot flag
+            if force_new:
+                context.user_data["force_new_session"] = False
+
+            previous_session_id = context.user_data.get("claude_session_id")
+            context.user_data["claude_session_id"] = claude_response.session_id
+
+            # Write to CLI history.jsonl so CLI /resume can discover bot sessions
+            if claude_response.session_id != previous_session_id:
+                current_dir = context.user_data.get(
+                    "current_directory",
+                    self.settings.approved_directories[0],
+                )
+                display_preview = (query.text or "")[:80]
+                append_history_entry(
+                    session_id=claude_response.session_id,
+                    display=display_preview,
+                    project=str(current_dir),
+                )
+
+            # Track directory changes
+            _update_working_directory_from_claude_response(
+                claude_response, context, self.settings, user_id
+            )
+
+            # Format response (no reply_markup — strip keyboards)
+            formatter = ResponseFormatter(self.settings)
+            formatted_messages = formatter.format_claude_response(
+                claude_response.content
+            )
+
+        except Exception as e:
+            success = False
+            logger.error("Claude query failed", error=str(e), user_id=user_id)
+            formatted_messages = [
+                FormattedMessage(_format_error_message(e), parse_mode="HTML")
+            ]
+        finally:
+            heartbeat.cancel()
+
+        await progress_manager.finalize()
+
+        for i, message in enumerate(formatted_messages):
+            if not message.text or not message.text.strip():
+                continue
+            try:
+                await update.message.reply_text(
+                    message.text,
+                    parse_mode=message.parse_mode,
+                    reply_markup=None,  # No keyboards in agentic mode
+                )
+                if i < len(formatted_messages) - 1:
+                    await asyncio.sleep(0.5)
+            except Exception as send_err:
+                logger.warning(
+                    "Failed to send HTML response, retrying as plain text",
+                    error=str(send_err),
+                    message_index=i,
+                )
+                try:
+                    await update.message.reply_text(
+                        message.text,
+                        reply_markup=None,
+                    )
+                except Exception as plain_err:
+                    await update.message.reply_text(
+                        f"Failed to deliver response "
+                        f"(Telegram error: {str(plain_err)[:150]}). "
+                        f"Please try again.",
+                    )
+
+        return success
+
     async def agentic_text(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Direct Claude passthrough. Simple progress. No suggestions."""
+        from .attachments import Query
+
         user_id = update.effective_user.id
         message_text = update.message.text
 
@@ -902,147 +1069,7 @@ class MessageOrchestrator:
                     # If no active client, fall through to normal text handling
                     # (will trigger a connect, and CLI will handle the /command)
 
-        # Sync from active client (e.g. after API-driven /resume)
-        _cm: Optional[ClientManager] = context.bot_data.get("client_manager")
-        if _cm:
-            _active = _cm.get_active_client(user_id)
-            if _active and _active.is_connected:
-                context.user_data["current_directory"] = Path(_active.directory)
-                if _active.session_id:
-                    context.user_data["claude_session_id"] = _active.session_id
-
-        # Restore persisted directory if not already set
-        storage = context.bot_data.get("storage")
-        if not context.user_data.get("current_directory") and storage:
-            persisted_dir = await storage.load_user_directory(user_id)
-            if persisted_dir:
-                persisted_path = Path(persisted_dir)
-                # Validate that persisted path is still in approved directories
-                if persisted_path.is_dir() and any(
-                    persisted_path == r or persisted_path.is_relative_to(r)
-                    for r in self.settings.approved_directories
-                ):
-                    context.user_data["current_directory"] = persisted_path
-                    logger.debug(
-                        "Restored user directory from database",
-                        user_id=user_id,
-                        directory=str(persisted_path),
-                    )
-
-        chat = update.message.chat
-        await chat.send_action("typing")
-
-        progress_msg = await update.message.reply_text("Working...")
-        start_time = time.time()
-        progress_manager = ProgressMessageManager(
-            initial_message=progress_msg, start_time=start_time
-        )
-        on_stream = build_stream_callback(progress_manager)
-
-        current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directories[0]
-        )
-        session_id = context.user_data.get("claude_session_id")
-
-        # Check if /new was used — skip auto-resume for this first message.
-        # Flag is only cleared after a successful run so retries keep the intent.
-        force_new = bool(context.user_data.get("force_new_session"))
-        # Implicit /new: if no session is set (e.g. after /repo), start fresh
-        if not force_new and session_id is None:
-            force_new = True
-
-        # Independent typing heartbeat — stays alive even with no stream events
-        heartbeat = self._start_typing_heartbeat(chat)
-
-        success = True
-        try:
-            claude_response = await self._run_claude_query(
-                prompt=message_text,
-                user_id=user_id,
-                current_dir=current_dir,
-                session_id=session_id,
-                force_new=force_new,
-                on_stream=on_stream,
-                context=context,
-            )
-
-            # New session created successfully — clear the one-shot flag
-            if force_new:
-                context.user_data["force_new_session"] = False
-
-            previous_session_id = context.user_data.get("claude_session_id")
-            context.user_data["claude_session_id"] = claude_response.session_id
-
-            # Write to CLI history.jsonl so CLI /resume can discover bot sessions
-            if claude_response.session_id != previous_session_id:
-                current_dir = context.user_data.get(
-                    "current_directory",
-                    self.settings.approved_directories[0],
-                )
-                display_preview = message_text[:80] if message_text else ""
-                append_history_entry(
-                    session_id=claude_response.session_id,
-                    display=display_preview,
-                    project=str(current_dir),
-                )
-
-            # Track directory changes
-            from .handlers.message import _update_working_directory_from_claude_response
-
-            _update_working_directory_from_claude_response(
-                claude_response, context, self.settings, user_id
-            )
-
-            # Format response (no reply_markup — strip keyboards)
-            from .utils.formatting import ResponseFormatter
-
-            formatter = ResponseFormatter(self.settings)
-            formatted_messages = formatter.format_claude_response(
-                claude_response.content
-            )
-
-        except Exception as e:
-            success = False
-            logger.error("Claude integration failed", error=str(e), user_id=user_id)
-            from .handlers.message import _format_error_message
-            from .utils.formatting import FormattedMessage
-
-            formatted_messages = [
-                FormattedMessage(_format_error_message(e), parse_mode="HTML")
-            ]
-        finally:
-            heartbeat.cancel()
-
-        await progress_manager.finalize()
-
-        for i, message in enumerate(formatted_messages):
-            if not message.text or not message.text.strip():
-                continue
-            try:
-                await update.message.reply_text(
-                    message.text,
-                    parse_mode=message.parse_mode,
-                    reply_markup=None,  # No keyboards in agentic mode
-                )
-                if i < len(formatted_messages) - 1:
-                    await asyncio.sleep(0.5)
-            except Exception as send_err:
-                logger.warning(
-                    "Failed to send HTML response, retrying as plain text",
-                    error=str(send_err),
-                    message_index=i,
-                )
-                try:
-                    await update.message.reply_text(
-                        message.text,
-                        reply_markup=None,
-                    )
-                except Exception as plain_err:
-                    await update.message.reply_text(
-                        f"Failed to deliver response "
-                        f"(Telegram error: {str(plain_err)[:150]}). "
-                        f"Please try again.",
-                    )
+        success = await self._execute_query(Query(text=message_text), update, context)
 
         # Audit log
         audit_logger = context.bot_data.get("audit_logger")
@@ -1054,227 +1081,61 @@ class MessageOrchestrator:
                 success=success,
             )
 
-    async def agentic_document(
+    async def agentic_attachment(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Process file upload -> Claude, minimal chrome."""
+        """Process photo or document upload -> Claude via Query pipeline."""
+        from .attachments import AttachmentProcessor, Query, UnsupportedAttachmentError
+
         user_id = update.effective_user.id
-        document = update.message.document
+
+        # Use MediaGroupCollector to buffer album items
+        updates = await self._media_collector.add(update)
+        if updates is None:
+            # Still buffering — more items may arrive
+            return
 
         logger.info(
-            "Agentic document upload",
+            "agentic_attachment",
             user_id=user_id,
-            filename=document.file_name,
+            num_items=len(updates),
         )
 
-        # Security validation
-        security_validator = context.bot_data.get("security_validator")
-        if security_validator:
-            valid, error = security_validator.validate_filename(document.file_name)
-            if not valid:
-                await update.message.reply_text(f"File rejected: {error}")
+        # Process each message into an Attachment
+        processor = AttachmentProcessor()
+        attachments = []
+        caption: Optional[str] = None
+        for u in updates:
+            msg = u.message
+            if msg is None:
+                continue
+            if caption is None:
+                caption = msg.caption
+            try:
+                att = await processor.process(msg)
+                attachments.append(att)
+            except UnsupportedAttachmentError as exc:
+                await update.message.reply_text(str(exc))
                 return
 
-        # Size check
-        max_size = 10 * 1024 * 1024
-        if document.file_size > max_size:
-            await update.message.reply_text(
-                f"File too large ({document.file_size / 1024 / 1024:.1f}MB). Max: 10MB."
-            )
+        if not attachments:
+            await update.message.reply_text("No supported attachments found.")
             return
 
-        chat = update.message.chat
-        await chat.send_action("typing")
-        progress_msg = await update.message.reply_text("Working...")
-
-        # Try enhanced file handler, fall back to basic
-        features = context.bot_data.get("features")
-        file_handler = features.get_file_handler() if features else None
-        prompt: Optional[str] = None
-
-        if file_handler:
-            try:
-                processed_file = await file_handler.handle_document_upload(
-                    document,
-                    user_id,
-                    update.message.caption or "Please review this file:",
-                )
-                prompt = processed_file.prompt
-            except Exception:
-                file_handler = None
-
-        if not file_handler:
-            file = await document.get_file()
-            file_bytes = await file.download_as_bytearray()
-            try:
-                content = file_bytes.decode("utf-8")
-                if len(content) > 50000:
-                    content = content[:50000] + "\n... (truncated)"
-                caption = update.message.caption or "Please review this file:"
-                prompt = (
-                    f"{caption}\n\n**File:** `{document.file_name}`\n\n"
-                    f"```\n{content}\n```"
-                )
-            except UnicodeDecodeError:
-                await progress_msg.edit_text(
-                    "Unsupported file format. Must be text-based (UTF-8)."
-                )
-                return
-
-        # Process with Claude
-        current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directory
+        query = Query(
+            text=caption or "Analyze this.",
+            attachments=tuple(attachments),
         )
-        session_id = context.user_data.get("claude_session_id")
 
-        # Check if /new was used — skip auto-resume for this first message.
-        # Flag is only cleared after a successful run so retries keep the intent.
-        force_new = bool(context.user_data.get("force_new_session"))
-        # Implicit /new: if no session is set (e.g. after /repo), start fresh
-        if not force_new and session_id is None:
-            force_new = True
+        success = await self._execute_query(query, update, context)
 
-        doc_start_time = time.time()
-        doc_progress_manager = ProgressMessageManager(
-            initial_message=progress_msg, start_time=doc_start_time
-        )
-        on_stream = build_stream_callback(doc_progress_manager)
-
-        heartbeat = self._start_typing_heartbeat(chat)
-        try:
-            claude_response = await self._run_claude_query(
-                prompt=prompt,
+        audit_logger = context.bot_data.get("audit_logger")
+        if audit_logger:
+            await audit_logger.log_command(
                 user_id=user_id,
-                current_dir=current_dir,
-                session_id=session_id,
-                force_new=force_new,
-                on_stream=on_stream,
-                context=context,
-            )
-
-            if force_new:
-                context.user_data["force_new_session"] = False
-
-            context.user_data["claude_session_id"] = claude_response.session_id
-
-            from .handlers.message import _update_working_directory_from_claude_response
-
-            _update_working_directory_from_claude_response(
-                claude_response, context, self.settings, user_id
-            )
-
-            from .utils.formatting import ResponseFormatter
-
-            formatter = ResponseFormatter(self.settings)
-            formatted_messages = formatter.format_claude_response(
-                claude_response.content
-            )
-
-            await doc_progress_manager.finalize()
-
-            for i, message in enumerate(formatted_messages):
-                await update.message.reply_text(
-                    message.text,
-                    parse_mode=message.parse_mode,
-                    reply_markup=None,
-                    reply_to_message_id=(update.message.message_id if i == 0 else None),
-                )
-                if i < len(formatted_messages) - 1:
-                    await asyncio.sleep(0.5)
-
-        except Exception as e:
-            from .handlers.message import _format_error_message
-
-            await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
-            logger.error("Claude file processing failed", error=str(e), user_id=user_id)
-        finally:
-            heartbeat.cancel()
-
-    async def agentic_photo(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Process photo -> Claude, minimal chrome."""
-        user_id = update.effective_user.id
-
-        features = context.bot_data.get("features")
-        image_handler = features.get_image_handler() if features else None
-
-        if not image_handler:
-            await update.message.reply_text("Photo processing is not available.")
-            return
-
-        chat = update.message.chat
-        await chat.send_action("typing")
-        progress_msg = await update.message.reply_text("Working...")
-
-        try:
-            photo = update.message.photo[-1]
-            processed_image = await image_handler.process_image(
-                photo, update.message.caption
-            )
-
-            current_dir = context.user_data.get(
-                "current_directory", self.settings.approved_directory
-            )
-            session_id = context.user_data.get("claude_session_id")
-
-            # Check if /new was used — skip auto-resume for this first message.
-            # Flag is only cleared after a successful run so retries keep the intent.
-            force_new = bool(context.user_data.get("force_new_session"))
-            # Implicit /new: if no session is set (e.g. after /repo), start fresh
-            if not force_new and session_id is None:
-                force_new = True
-
-            photo_start_time = time.time()
-            photo_progress_manager = ProgressMessageManager(
-                initial_message=progress_msg, start_time=photo_start_time
-            )
-            on_stream = build_stream_callback(photo_progress_manager)
-
-            heartbeat = self._start_typing_heartbeat(chat)
-            try:
-                claude_response = await self._run_claude_query(
-                    prompt=processed_image.prompt,
-                    user_id=user_id,
-                    current_dir=current_dir,
-                    session_id=session_id,
-                    force_new=force_new,
-                    on_stream=on_stream,
-                    context=context,
-                )
-            finally:
-                heartbeat.cancel()
-
-            if force_new:
-                context.user_data["force_new_session"] = False
-
-            context.user_data["claude_session_id"] = claude_response.session_id
-
-            from .utils.formatting import ResponseFormatter
-
-            formatter = ResponseFormatter(self.settings)
-            formatted_messages = formatter.format_claude_response(
-                claude_response.content
-            )
-
-            await photo_progress_manager.finalize()
-
-            for i, message in enumerate(formatted_messages):
-                await update.message.reply_text(
-                    message.text,
-                    parse_mode=message.parse_mode,
-                    reply_markup=None,
-                    reply_to_message_id=(update.message.message_id if i == 0 else None),
-                )
-                if i < len(formatted_messages) - 1:
-                    await asyncio.sleep(0.5)
-
-        except Exception as e:
-            from .handlers.message import _format_error_message
-
-            await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
-            logger.error(
-                "Claude photo processing failed", error=str(e), user_id=user_id
+                command="attachment",
+                args=[f"{len(attachments)} file(s)"],
+                success=success,
             )
 
     async def agentic_repo(

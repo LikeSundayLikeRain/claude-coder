@@ -162,7 +162,8 @@ async def test_skill_text_passthrough(orchestrator, mock_update, mock_context):
 
     # Verify prompt is passed verbatim — no <skill-invocation> wrapping
     mock_query.assert_called_once()
-    prompt = mock_query.call_args.kwargs.get("prompt", mock_query.call_args[0][0] if mock_query.call_args[0] else "")
+    query_arg = mock_query.call_args.kwargs.get("query")
+    prompt = query_arg.text if query_arg is not None else ""
     assert prompt == "/deploy production"
     assert "<skill-invocation>" not in prompt
     assert "<skill-body>" not in prompt
