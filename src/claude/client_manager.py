@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Optional
 
@@ -11,8 +10,7 @@ import structlog
 from src.claude.options import OptionsBuilder
 from src.claude.session import SessionResolver
 from src.claude.user_client import UserClient
-from src.storage.models import BotSessionModel
-from src.storage.repositories import BotSessionRepository
+from src.storage.repositories import UserRepository
 
 logger = structlog.get_logger()
 
@@ -24,12 +22,12 @@ class ClientManager:
 
     def __init__(
         self,
-        bot_session_repo: BotSessionRepository,
+        user_repo: UserRepository,
         options_builder: Optional[OptionsBuilder] = None,
-        history_path: Optional[Path] = None,
+        history_path: Optional[Path] = None,  # keep for /resume UI only
         idle_timeout: float = DEFAULT_IDLE_TIMEOUT_SECONDS,
     ) -> None:
-        self._bot_session_repo = bot_session_repo
+        self._user_repo = user_repo
         self._options_builder = options_builder or OptionsBuilder()
         self._session_resolver = SessionResolver(history_path=history_path)
         self._idle_timeout = idle_timeout
@@ -45,8 +43,6 @@ class ClientManager:
         user_id: int,
         directory: str,
         session_id: Optional[str] = None,
-        model: Optional[str] = None,
-        betas: Optional[list[str]] = None,
         approved_directory: Optional[str] = None,
         force_new: bool = False,
     ) -> UserClient:
@@ -66,40 +62,26 @@ class ClientManager:
         if existing is not None:
             await existing.stop()
 
-        # Resolve session_id: explicit > persisted > history.jsonl
-        # Skip auto-resolution when force_new (start a fresh session)
+        # Resolve session_id: explicit > persisted DB
+        # Skip auto-resolution when force_new
         resolved_session_id = session_id
-        resolved_model = model
-        resolved_betas = betas
 
         if resolved_session_id is None and not force_new:
-            persisted: Optional[BotSessionModel] = (
-                await self._bot_session_repo.get_by_user(user_id)
-            )
-            if persisted is not None and persisted.directory == directory:
-                resolved_session_id = persisted.session_id
-                if resolved_model is None:
-                    resolved_model = persisted.model
-                if resolved_betas is None:
-                    resolved_betas = persisted.betas
-
-        if resolved_session_id is None and not force_new:
-            resolved_session_id = self._session_resolver.get_latest_session(directory)
+            user = await self._user_repo.get_user(user_id)
+            if user is not None and user.session_id and user.directory == directory:
+                resolved_session_id = user.session_id
 
         # Create and start
         client = UserClient(
             user_id=user_id,
             directory=directory,
             session_id=resolved_session_id,
-            model=resolved_model,
             idle_timeout=self._idle_timeout,
             on_exit=self._on_client_exit,
         )
         options = self._options_builder.build(
             cwd=directory,
             session_id=resolved_session_id,
-            model=resolved_model,
-            betas=resolved_betas,
             approved_directory=approved_directory,
         )
         await client.start(options)
@@ -107,12 +89,10 @@ class ClientManager:
 
         # Persist state if we have a session_id
         if client.session_id is not None:
-            await self._bot_session_repo.upsert(
+            await self._user_repo.update_session(
                 user_id=user_id,
                 session_id=client.session_id,
                 directory=directory,
-                model=resolved_model,
-                betas=resolved_betas,
             )
 
         logger.info(
@@ -128,8 +108,6 @@ class ClientManager:
         user_id: int,
         session_id: str,
         directory: str,
-        model: Optional[str] = None,
-        betas: Optional[list[str]] = None,
         approved_directory: Optional[str] = None,
     ) -> UserClient:
         """Stop current, connect to different session."""
@@ -141,8 +119,6 @@ class ClientManager:
             user_id=user_id,
             directory=directory,
             session_id=session_id,
-            model=model,
-            betas=betas,
             approved_directory=approved_directory,
         )
 
@@ -151,8 +127,6 @@ class ClientManager:
         user_id: int,
         session_id: str,
         directory: str,
-        model: Optional[str] = None,
-        betas: Optional[list[str]] = None,
     ) -> None:
         """Disconnect current client and persist session for lazy reconnect.
 
@@ -161,13 +135,7 @@ class ClientManager:
         the persisted session from the database.
         """
         await self.disconnect(user_id)
-        await self._bot_session_repo.upsert(
-            user_id=user_id,
-            session_id=session_id,
-            directory=directory,
-            model=model,
-            betas=betas,
-        )
+        await self._user_repo.update_session(user_id, session_id, directory)
         logger.info(
             "client_manager_next_session_set",
             user_id=user_id,
@@ -187,21 +155,13 @@ class ClientManager:
         model: str,
         betas: Optional[list[str]] = None,
     ) -> None:
-        """Update model on the client and persist."""
+        """Update model on the client (in-memory only)."""
         client = self._clients.get(user_id)
         if client is None:
             return
         client.model = model
         if betas is not None:
             client.betas = betas
-        if client.session_id is not None:
-            await self._bot_session_repo.upsert(
-                user_id=user_id,
-                session_id=client.session_id,
-                directory=client.directory,
-                model=model,
-                betas=client.betas,
-            )
 
     def get_active_client(self, user_id: int) -> Optional["UserClient"]:
         """Return the active UserClient for a user, or None."""
@@ -232,12 +192,7 @@ class ClientManager:
         if client is None:
             return
         client.session_id = session_id
-        await self._bot_session_repo.upsert(
-            user_id=user_id,
-            session_id=session_id,
-            directory=client.directory,
-            model=client.model,
-        )
+        await self._user_repo.update_session(user_id, session_id, client.directory)
 
     def get_latest_session(self, directory: str) -> Optional[str]:
         """Return the most recent session ID for a directory, or None."""

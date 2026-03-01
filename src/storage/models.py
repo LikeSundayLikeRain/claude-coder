@@ -5,8 +5,8 @@ Using dataclasses for simplicity and type safety.
 
 import json
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any, Dict, Optional
 
 import aiosqlite
 
@@ -32,32 +32,13 @@ class UserModel:
 
     user_id: int
     telegram_username: Optional[str] = None
-    first_seen: Optional[datetime] = None
-    last_active: Optional[datetime] = None
-    is_allowed: bool = False
-    total_cost: float = 0.0
-    message_count: int = 0
-    session_count: int = 0
-    current_directory: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
-        data = asdict(self)
-        # Convert datetime to ISO format
-        for key in ["first_seen", "last_active"]:
-            if data[key]:
-                data[key] = data[key].isoformat()
-        return data
+    session_id: Optional[str] = None
+    directory: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: aiosqlite.Row) -> "UserModel":
         """Create from database row."""
         data = dict(row)
-
-        # Parse datetime fields
-        for field in ["first_seen", "last_active"]:
-            data[field] = _parse_datetime(data.get(field))
-
         return cls(**data)
 
 
@@ -205,38 +186,3 @@ class ScheduledJobModel:
         return cls(**data)
 
 
-@dataclass
-class BotSessionModel:
-    """Persisted bot session state for restart recovery."""
-
-    user_id: int
-    session_id: str
-    directory: str
-    model: Optional[str]
-    betas: Optional[List[str]]
-    last_active: datetime
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for storage."""
-        data = asdict(self)
-        betas = data["betas"]
-        data["betas"] = json.dumps(betas) if betas is not None else None
-        data["last_active"] = data["last_active"].isoformat()
-        return data
-
-    @classmethod
-    def from_row(cls, row: Any) -> "BotSessionModel":
-        """Create from database row."""
-        data = dict(row)
-
-        # Parse betas from JSON string
-        if data.get("betas") is not None:
-            try:
-                data["betas"] = json.loads(data["betas"])
-            except (json.JSONDecodeError, TypeError):
-                data["betas"] = None
-
-        # Parse last_active from ISO string if needed
-        data["last_active"] = _parse_datetime(data["last_active"])
-
-        return cls(**data)

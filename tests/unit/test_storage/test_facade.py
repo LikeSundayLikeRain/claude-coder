@@ -1,7 +1,6 @@
 """Tests for storage facade."""
 
 import tempfile
-from datetime import datetime  # noqa: F401
 from pathlib import Path
 
 import pytest
@@ -25,41 +24,48 @@ class TestStorageFacade:
 
     async def test_initialization(self, storage):
         """Test storage initialization."""
-        # Should be able to perform health check
         assert await storage.health_check()
 
-    async def test_get_or_create_user(self, storage):
-        """Test getting or creating user."""
-        # Create new user
-        user = await storage.get_or_create_user(12345, "testuser")
-        assert user.user_id == 12345
-        assert user.telegram_username == "testuser"
-        assert not user.is_allowed  # Default to not allowed
+    async def test_save_and_load_user_session(self, storage):
+        """Saving a session and loading it back returns the same values."""
+        await storage.users.ensure_user(12354)
+        await storage.save_user_session(12354, "sess-abc", "/home/user/project")
 
-        # Get existing user
-        user2 = await storage.get_or_create_user(12345, "testuser")
-        assert user2.user_id == 12345
-        assert user2.telegram_username == "testuser"
+        state = await storage.load_user_state(12354)
+        assert state is not None
+        assert state.session_id == "sess-abc"
+        assert state.directory == "/home/user/project"
 
-    async def test_is_user_allowed(self, storage):
-        """Test checking user permissions."""
-        # Create allowed user
-        await storage.get_or_create_user(12348, "alloweduser")
-        await storage.users.set_user_allowed(12348, True)
+    async def test_load_user_state_returns_none_for_unknown_user(self, storage):
+        """load_user_state returns None when user has no row."""
+        state = await storage.load_user_state(99999)
+        assert state is None
 
-        # Check permission
-        assert await storage.is_user_allowed(12348)
+    async def test_save_user_directory_clears_session(self, storage):
+        """save_user_directory updates directory and clears session_id."""
+        await storage.users.ensure_user(12355)
+        await storage.save_user_session(12355, "sess-xyz", "/old/path")
+        await storage.save_user_directory(12355, "/new/path")
 
-        # Create disallowed user
-        await storage.get_or_create_user(12349, "disalloweduser")
-        assert not await storage.is_user_allowed(12349)
+        state = await storage.load_user_state(12355)
+        assert state is not None
+        assert state.directory == "/new/path"
+        assert state.session_id is None
+
+    async def test_clear_user_session(self, storage):
+        """clear_user_session removes session_id but keeps directory."""
+        await storage.users.ensure_user(12356)
+        await storage.save_user_session(12356, "sess-to-clear", "/some/dir")
+        await storage.clear_user_session(12356)
+
+        state = await storage.load_user_state(12356)
+        assert state is not None
+        assert state.session_id is None
+        assert state.directory == "/some/dir"
 
     async def test_log_security_event(self, storage):
         """Test logging security events."""
-        # Setup user
-        await storage.get_or_create_user(12352, "securityuser")
-
-        # Log security event
+        await storage.users.ensure_user(12352)
         await storage.log_security_event(
             user_id=12352,
             event_type="authentication_failure",
@@ -68,7 +74,6 @@ class TestStorageFacade:
             ip_address="192.168.1.1",
         )
 
-        # Verify event was logged
         audit_logs = await storage.audit.get_user_audit_log(12352)
         assert len(audit_logs) == 1
         assert audit_logs[0].event_type == "authentication_failure"
@@ -77,8 +82,7 @@ class TestStorageFacade:
 
     async def test_log_bot_event(self, storage):
         """Test logging bot events."""
-        await storage.get_or_create_user(12353, "botuser")
-
+        await storage.users.ensure_user(12353)
         await storage.log_bot_event(
             user_id=12353,
             event_type="command_executed",
@@ -89,21 +93,3 @@ class TestStorageFacade:
         audit_logs = await storage.audit.get_user_audit_log(12353)
         assert len(audit_logs) == 1
         assert audit_logs[0].event_type == "command_executed"
-
-    async def test_save_and_load_user_directory(self, storage):
-        """Test persisting and loading user directory."""
-        await storage.get_or_create_user(12354, "diruser")
-
-        # Save directory
-        await storage.save_user_directory(12354, "/home/user/project")
-
-        # Load directory
-        directory = await storage.load_user_directory(12354)
-        assert directory == "/home/user/project"
-
-    async def test_load_user_directory_returns_none_when_unset(self, storage):
-        """Test loading directory when not set."""
-        await storage.get_or_create_user(12355, "nodiruser")
-
-        directory = await storage.load_user_directory(12355)
-        assert directory is None

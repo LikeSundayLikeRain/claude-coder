@@ -7,16 +7,13 @@ Features:
 """
 
 import json
-from datetime import UTC, datetime, timedelta
-from typing import Dict, List, Optional
+from typing import List, Optional
 
-import aiosqlite
 import structlog
 
 from .database import DatabaseManager
 from .models import (
     AuditLogModel,
-    BotSessionModel,
     ProjectThreadModel,
     UserModel,
 )
@@ -28,7 +25,6 @@ class UserRepository:
     """User data access."""
 
     def __init__(self, db_manager: DatabaseManager):
-        """Initialize repository."""
         self.db = db_manager
 
     async def get_user(self, user_id: int) -> Optional[UserModel]:
@@ -40,77 +36,47 @@ class UserRepository:
             row = await cursor.fetchone()
             return UserModel.from_row(row) if row else None
 
-    async def create_user(self, user: UserModel) -> UserModel:
-        """Create new user."""
+    async def ensure_user(self, user_id: int, telegram_username: Optional[str] = None) -> None:
+        """Create user row if it doesn't exist."""
+        async with self.db.get_connection() as conn:
+            await conn.execute(
+                "INSERT OR IGNORE INTO users (user_id, telegram_username) VALUES (?, ?)",
+                (user_id, telegram_username),
+            )
+            await conn.commit()
+
+    async def update_session(self, user_id: int, session_id: str, directory: str) -> None:
+        """Update session_id and directory for a user."""
         async with self.db.get_connection() as conn:
             await conn.execute(
                 """
-                INSERT INTO users
-                (user_id, telegram_username, first_seen,
-                 last_active, is_allowed)
-                VALUES (?, ?, ?, ?, ?)
-            """,
-                (
-                    user.user_id,
-                    user.telegram_username,
-                    user.first_seen or datetime.now(UTC),
-                    user.last_active or datetime.now(UTC),
-                    user.is_allowed,
-                ),
+                INSERT INTO users (user_id, session_id, directory)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    directory = excluded.directory
+                """,
+                (user_id, session_id, directory),
             )
             await conn.commit()
 
-            logger.info(
-                "Created user", user_id=user.user_id, username=user.telegram_username
-            )
-            return user
-
-    async def update_user(self, user: UserModel):
-        """Update user data."""
+    async def update_directory(self, user_id: int, directory: str) -> None:
+        """Update directory and clear session_id (e.g. after /repo)."""
         async with self.db.get_connection() as conn:
             await conn.execute(
-                """
-                UPDATE users
-                SET telegram_username = ?, last_active = ?,
-                    total_cost = ?, message_count = ?, session_count = ?
-                WHERE user_id = ?
-            """,
-                (
-                    user.telegram_username,
-                    user.last_active or datetime.now(UTC),
-                    user.total_cost,
-                    user.message_count,
-                    user.session_count,
-                    user.user_id,
-                ),
+                "UPDATE users SET directory = ?, session_id = NULL WHERE user_id = ?",
+                (directory, user_id),
             )
             await conn.commit()
 
-    async def get_allowed_users(self) -> List[int]:
-        """Get list of allowed user IDs."""
-        async with self.db.get_connection() as conn:
-            cursor = await conn.execute(
-                "SELECT user_id FROM users WHERE is_allowed = 1"
-            )
-            rows = await cursor.fetchall()
-            return [row[0] for row in rows]
-
-    async def set_user_allowed(self, user_id: int, allowed: bool):
-        """Set user allowed status."""
+    async def clear_session(self, user_id: int) -> None:
+        """Clear session_id (e.g. after /new)."""
         async with self.db.get_connection() as conn:
             await conn.execute(
-                "UPDATE users SET is_allowed = ? WHERE user_id = ?", (allowed, user_id)
+                "UPDATE users SET session_id = NULL WHERE user_id = ?",
+                (user_id,),
             )
             await conn.commit()
-
-            logger.info("Updated user permissions", user_id=user_id, allowed=allowed)
-
-    async def get_all_users(self) -> List[UserModel]:
-        """Get all users."""
-        async with self.db.get_connection() as conn:
-            cursor = await conn.execute("SELECT * FROM users ORDER BY first_seen DESC")
-            rows = await cursor.fetchall()
-            return [UserModel.from_row(row) for row in rows]
 
 
 class ProjectThreadRepository:
@@ -331,61 +297,3 @@ class AuditLogRepository:
             return [AuditLogModel.from_row(row) for row in rows]
 
 
-class BotSessionRepository:
-    """Bot session state data access for restart recovery."""
-
-    def __init__(self, db: DatabaseManager) -> None:
-        """Initialize repository."""
-        self.db = db
-
-    async def upsert(
-        self,
-        user_id: int,
-        session_id: str,
-        directory: str,
-        model: Optional[str] = None,
-        betas: Optional[List[str]] = None,
-    ) -> None:
-        """Insert or update bot session for a user."""
-        betas_json = json.dumps(betas) if betas is not None else None
-        last_active = datetime.now(UTC)
-        async with self.db.get_connection() as conn:
-            await conn.execute(
-                """
-                INSERT OR REPLACE INTO bot_sessions
-                    (user_id, session_id, directory, model, betas, last_active)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (user_id, session_id, directory, model, betas_json, last_active),
-            )
-            await conn.commit()
-
-    async def get_by_user(self, user_id: int) -> Optional[BotSessionModel]:
-        """Get bot session by user ID."""
-        async with self.db.get_connection() as conn:
-            cursor = await conn.execute(
-                "SELECT * FROM bot_sessions WHERE user_id = ?",
-                (user_id,),
-            )
-            row = await cursor.fetchone()
-            return BotSessionModel.from_row(row) if row else None
-
-    async def delete(self, user_id: int) -> None:
-        """Delete bot session for a user."""
-        async with self.db.get_connection() as conn:
-            await conn.execute(
-                "DELETE FROM bot_sessions WHERE user_id = ?",
-                (user_id,),
-            )
-            await conn.commit()
-
-    async def cleanup_expired(self, max_age_hours: int = 24) -> int:
-        """Delete entries older than max_age_hours; returns deleted count."""
-        cutoff = datetime.now(UTC) - timedelta(hours=max_age_hours)
-        async with self.db.get_connection() as conn:
-            cursor = await conn.execute(
-                "DELETE FROM bot_sessions WHERE last_active < ?",
-                (cutoff,),
-            )
-            await conn.commit()
-            return cursor.rowcount

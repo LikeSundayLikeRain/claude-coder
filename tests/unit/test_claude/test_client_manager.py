@@ -1,6 +1,5 @@
 """Tests for ClientManager: persistent per-user UserClient lifecycle management."""
 
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,12 +9,13 @@ import pytest
 from src.claude.client_manager import ClientManager
 
 
-def _make_mock_bot_session_repo() -> MagicMock:
+def _make_mock_user_repo() -> MagicMock:
     repo = MagicMock()
-    repo.upsert = AsyncMock()
-    repo.get_by_user = AsyncMock(return_value=None)
-    repo.delete = AsyncMock()
-    repo.cleanup_expired = AsyncMock(return_value=0)
+    repo.get_user = AsyncMock(return_value=None)
+    repo.update_session = AsyncMock()
+    repo.update_directory = AsyncMock()
+    repo.clear_session = AsyncMock()
+    repo.ensure_user = AsyncMock()
     return repo
 
 
@@ -50,13 +50,13 @@ class TestGetOrConnect:
     @pytest.mark.asyncio
     async def test_get_or_connect_creates_new_client(self) -> None:
         """Creates UserClient, starts it, stores in _clients dict."""
-        repo = _make_mock_bot_session_repo()
+        repo = _make_mock_user_repo()
         builder = _make_mock_options_builder()
         mock_client = _make_mock_user_client()
 
         with patch("src.claude.client_manager.UserClient", return_value=mock_client):
             manager = ClientManager(
-                bot_session_repo=repo,
+                user_repo=repo,
                 options_builder=builder,
             )
             result = await manager.get_or_connect(user_id=1, directory="/some/dir")
@@ -68,7 +68,7 @@ class TestGetOrConnect:
     @pytest.mark.asyncio
     async def test_get_or_connect_reuses_existing(self) -> None:
         """Returns existing connected client for same user+directory without reconnecting."""
-        repo = _make_mock_bot_session_repo()
+        repo = _make_mock_user_repo()
         builder = _make_mock_options_builder()
         mock_client = _make_mock_user_client(directory="/some/dir")
         mock_client.is_connected = True
@@ -77,7 +77,7 @@ class TestGetOrConnect:
             "src.claude.client_manager.UserClient", return_value=mock_client
         ) as mock_cls:
             manager = ClientManager(
-                bot_session_repo=repo,
+                user_repo=repo,
                 options_builder=builder,
             )
             # First call creates
@@ -94,7 +94,7 @@ class TestGetOrConnect:
     @pytest.mark.asyncio
     async def test_get_or_connect_reconnects_on_directory_change(self) -> None:
         """Stops old client and creates new one when directory changes."""
-        repo = _make_mock_bot_session_repo()
+        repo = _make_mock_user_repo()
         builder = _make_mock_options_builder()
         old_client = _make_mock_user_client(directory="/old/dir")
         new_client = _make_mock_user_client(directory="/new/dir")
@@ -103,7 +103,7 @@ class TestGetOrConnect:
             "src.claude.client_manager.UserClient", side_effect=[old_client, new_client]
         ):
             manager = ClientManager(
-                bot_session_repo=repo,
+                user_repo=repo,
                 options_builder=builder,
             )
             await manager.get_or_connect(user_id=1, directory="/old/dir")
@@ -120,13 +120,13 @@ class TestInterrupt:
     @pytest.mark.asyncio
     async def test_interrupt(self) -> None:
         """Calls interrupt() on the user's client."""
-        repo = _make_mock_bot_session_repo()
+        repo = _make_mock_user_repo()
         builder = _make_mock_options_builder()
         mock_client = _make_mock_user_client()
 
         with patch("src.claude.client_manager.UserClient", return_value=mock_client):
             manager = ClientManager(
-                bot_session_repo=repo,
+                user_repo=repo,
                 options_builder=builder,
             )
             await manager.get_or_connect(user_id=1, directory="/some/dir")
@@ -137,8 +137,8 @@ class TestInterrupt:
     @pytest.mark.asyncio
     async def test_interrupt_noop_for_unknown_user(self) -> None:
         """Doesn't raise for unknown user."""
-        repo = _make_mock_bot_session_repo()
-        manager = ClientManager(bot_session_repo=repo)
+        repo = _make_mock_user_repo()
+        manager = ClientManager(user_repo=repo)
         # Should not raise
         await manager.interrupt(999)
 
@@ -149,13 +149,13 @@ class TestDisconnect:
     @pytest.mark.asyncio
     async def test_disconnect(self) -> None:
         """Stops and removes from _clients."""
-        repo = _make_mock_bot_session_repo()
+        repo = _make_mock_user_repo()
         builder = _make_mock_options_builder()
         mock_client = _make_mock_user_client()
 
         with patch("src.claude.client_manager.UserClient", return_value=mock_client):
             manager = ClientManager(
-                bot_session_repo=repo,
+                user_repo=repo,
                 options_builder=builder,
             )
             await manager.get_or_connect(user_id=1, directory="/some/dir")
@@ -169,7 +169,7 @@ class TestDisconnect:
     @pytest.mark.asyncio
     async def test_disconnect_all(self) -> None:
         """Stops all clients."""
-        repo = _make_mock_bot_session_repo()
+        repo = _make_mock_user_repo()
         builder = _make_mock_options_builder()
         client_a = _make_mock_user_client(directory="/dir/a")
         client_b = _make_mock_user_client(directory="/dir/b")
@@ -178,7 +178,7 @@ class TestDisconnect:
             "src.claude.client_manager.UserClient", side_effect=[client_a, client_b]
         ):
             manager = ClientManager(
-                bot_session_repo=repo,
+                user_repo=repo,
                 options_builder=builder,
             )
             await manager.get_or_connect(user_id=1, directory="/dir/a")
@@ -191,18 +191,18 @@ class TestDisconnect:
 
 
 class TestPersistence:
-    """Test session persistence to/from BotSessionRepository."""
+    """Test session persistence to/from UserRepository."""
 
     @pytest.mark.asyncio
     async def test_persists_session_on_connect(self) -> None:
-        """Calls bot_session_repo.upsert() after connecting."""
-        repo = _make_mock_bot_session_repo()
+        """Calls user_repo.update_session() after connecting."""
+        repo = _make_mock_user_repo()
         builder = _make_mock_options_builder()
         mock_client = _make_mock_user_client(session_id="sess-abc")
 
         with patch("src.claude.client_manager.UserClient", return_value=mock_client):
             manager = ClientManager(
-                bot_session_repo=repo,
+                user_repo=repo,
                 options_builder=builder,
             )
             await manager.get_or_connect(
@@ -211,26 +211,20 @@ class TestPersistence:
                 session_id="sess-abc",
             )
 
-        repo.upsert.assert_awaited_once()
-        call_kwargs = repo.upsert.call_args
-        assert call_kwargs.kwargs["user_id"] == 1 or call_kwargs.args[0] == 1
+        repo.update_session.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_restores_from_persisted_state(self) -> None:
-        """Reads BotSessionModel from repo and uses persisted session_id."""
-        from src.storage.models import BotSessionModel
-        from datetime import datetime, UTC
+        """Reads UserModel from repo and uses persisted session_id."""
+        from src.storage.models import UserModel
 
-        persisted = BotSessionModel(
+        persisted = UserModel(
             user_id=1,
             session_id="persisted-session",
             directory="/some/dir",
-            model="claude-opus-4-6",
-            betas=None,
-            last_active=datetime.now(UTC),
         )
-        repo = _make_mock_bot_session_repo()
-        repo.get_by_user = AsyncMock(return_value=persisted)
+        repo = _make_mock_user_repo()
+        repo.get_user = AsyncMock(return_value=persisted)
         builder = _make_mock_options_builder()
         mock_client = _make_mock_user_client(session_id="persisted-session")
 
@@ -238,13 +232,13 @@ class TestPersistence:
             "src.claude.client_manager.UserClient", return_value=mock_client
         ) as mock_cls:
             manager = ClientManager(
-                bot_session_repo=repo,
+                user_repo=repo,
                 options_builder=builder,
             )
             result = await manager.get_or_connect(user_id=1, directory="/some/dir")
 
         # Should have looked up persisted state
-        repo.get_by_user.assert_awaited_once_with(1)
+        repo.get_user.assert_awaited_once_with(1)
         # UserClient created with persisted session_id
         init_kwargs = mock_cls.call_args.kwargs
         assert init_kwargs.get("session_id") == "persisted-session"
@@ -256,7 +250,7 @@ class TestSwitchSession:
     @pytest.mark.asyncio
     async def test_switch_session(self) -> None:
         """Stops current, starts new session."""
-        repo = _make_mock_bot_session_repo()
+        repo = _make_mock_user_repo()
         builder = _make_mock_options_builder()
         old_client = _make_mock_user_client(directory="/dir", session_id="old-sess")
         new_client = _make_mock_user_client(directory="/dir", session_id="new-sess")
@@ -265,7 +259,7 @@ class TestSwitchSession:
             "src.claude.client_manager.UserClient", side_effect=[old_client, new_client]
         ):
             manager = ClientManager(
-                bot_session_repo=repo,
+                user_repo=repo,
                 options_builder=builder,
             )
             await manager.get_or_connect(user_id=1, directory="/dir")
@@ -281,28 +275,29 @@ class TestSwitchSession:
 
 
 class TestSetModel:
-    """Test set_model() updates and persists."""
+    """Test set_model() updates in-memory only."""
 
     @pytest.mark.asyncio
     async def test_set_model(self) -> None:
-        """Updates client model and persists."""
-        repo = _make_mock_bot_session_repo()
+        """Updates client model in-memory; does not persist to DB."""
+        repo = _make_mock_user_repo()
         builder = _make_mock_options_builder()
         mock_client = _make_mock_user_client(session_id="some-session")
 
         with patch("src.claude.client_manager.UserClient", return_value=mock_client):
             manager = ClientManager(
-                bot_session_repo=repo,
+                user_repo=repo,
                 options_builder=builder,
             )
             await manager.get_or_connect(user_id=1, directory="/some/dir")
-            # Reset upsert call count after initial connect
-            repo.upsert.reset_mock()
+            # Reset mock counts after initial connect
+            repo.update_session.reset_mock()
 
             await manager.set_model(user_id=1, model="claude-opus-4-6")
 
         assert mock_client.model == "claude-opus-4-6"
-        repo.upsert.assert_awaited_once()
+        # Model is no longer persisted to DB
+        repo.update_session.assert_not_awaited()
 
 
 class TestListSessions:
@@ -310,12 +305,12 @@ class TestListSessions:
 
     def test_list_sessions(self, tmp_path: Path) -> None:
         """Delegates to session_resolver."""
-        repo = _make_mock_bot_session_repo()
+        repo = _make_mock_user_repo()
         history_file = tmp_path / "history.jsonl"
         history_file.write_text("")  # empty but valid
 
         manager = ClientManager(
-            bot_session_repo=repo,
+            user_repo=repo,
             history_path=history_file,
         )
         result = manager.list_sessions(directory="/some/dir", limit=5)
@@ -324,13 +319,13 @@ class TestListSessions:
 
 @pytest.fixture
 def mock_repo() -> MagicMock:
-    return _make_mock_bot_session_repo()
+    return _make_mock_user_repo()
 
 
 @pytest.fixture
 def manager(mock_repo: MagicMock) -> ClientManager:
     return ClientManager(
-        bot_session_repo=mock_repo,
+        user_repo=mock_repo,
         options_builder=_make_mock_options_builder(),
     )
 
@@ -352,15 +347,15 @@ class TestUpdateSessionId:
         await manager.update_session_id(123, "new-session")
 
         assert mock_client.session_id == "new-session"
-        mock_repo.upsert.assert_awaited_once()
+        mock_repo.update_session.assert_awaited_once()
 
 
 class TestOnClientExit:
     """Test _on_client_exit removes client from dict."""
 
     def test_on_client_exit_removes_client(self) -> None:
-        repo = _make_mock_bot_session_repo()
-        manager = ClientManager(bot_session_repo=repo)
+        repo = _make_mock_user_repo()
+        manager = ClientManager(user_repo=repo)
         mock_client = _make_mock_user_client()
         manager._clients[42] = mock_client
 
@@ -369,8 +364,8 @@ class TestOnClientExit:
         assert 42 not in manager._clients
 
     def test_on_client_exit_noop_for_unknown_user(self) -> None:
-        repo = _make_mock_bot_session_repo()
-        manager = ClientManager(bot_session_repo=repo)
+        repo = _make_mock_user_repo()
+        manager = ClientManager(user_repo=repo)
         # Should not raise
         manager._on_client_exit(999)
 
@@ -379,8 +374,8 @@ class TestGetAvailableCommands:
     """Test get_available_commands() delegates to active client."""
 
     def test_returns_commands_from_active_client(self) -> None:
-        repo = _make_mock_bot_session_repo()
-        manager = ClientManager(bot_session_repo=repo)
+        repo = _make_mock_user_repo()
+        manager = ClientManager(user_repo=repo)
         mock_client = _make_mock_user_client()
         mock_client.available_commands = [
             {"name": "brainstorm", "description": "Ideas", "argumentHint": ""},
@@ -391,7 +386,7 @@ class TestGetAvailableCommands:
         assert result[0]["name"] == "brainstorm"
 
     def test_returns_empty_for_unknown_user(self) -> None:
-        repo = _make_mock_bot_session_repo()
-        manager = ClientManager(bot_session_repo=repo)
+        repo = _make_mock_user_repo()
+        manager = ClientManager(user_repo=repo)
         result = manager.get_available_commands(user_id=999)
         assert result == []

@@ -360,6 +360,36 @@ class DatabaseManager:
                     ON bot_sessions(last_active);
                 """,
             ),
+            (
+                10,
+                """
+                PRAGMA foreign_keys = OFF;
+
+                DROP TABLE IF EXISTS users_new;
+
+                CREATE TABLE users_new (
+                    user_id           INTEGER PRIMARY KEY,
+                    telegram_username TEXT,
+                    session_id        TEXT,
+                    directory         TEXT
+                );
+
+                INSERT INTO users_new (user_id, telegram_username, session_id, directory)
+                SELECT
+                    u.user_id,
+                    u.telegram_username,
+                    bs.session_id,
+                    COALESCE(bs.directory, u.current_directory)
+                FROM users u
+                LEFT JOIN bot_sessions bs ON u.user_id = bs.user_id;
+
+                DROP TABLE users;
+                ALTER TABLE users_new RENAME TO users;
+                DROP TABLE IF EXISTS bot_sessions;
+
+                PRAGMA foreign_keys = ON;
+                """,
+            ),
         ]
 
     async def _init_pool(self):

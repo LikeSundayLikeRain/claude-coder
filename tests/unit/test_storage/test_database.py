@@ -45,7 +45,7 @@ class TestDatabaseManager:
             )
             tables = [row[0] for row in await cursor.fetchall()]
 
-            # Tables that should exist after all migrations (including migration 7 drops)
+            # Tables that should exist after all migrations
             expected_tables = [
                 "users",
                 "audit_log",
@@ -53,7 +53,6 @@ class TestDatabaseManager:
                 "schema_version",
                 "scheduled_jobs",
                 "webhook_events",
-                "bot_sessions",
             ]
 
             for table in expected_tables:
@@ -103,7 +102,7 @@ class TestDatabaseManager:
         async with db_manager.get_connection() as conn:
             cursor = await conn.execute("SELECT MAX(version) FROM schema_version")
             version = await cursor.fetchone()
-            assert version[0] == 9  # Should be at migration 9
+            assert version[0] == 10  # Should be at migration 10
 
     async def test_views_dropped(self, db_manager):
         """Test that analytics views were dropped by migration 7."""

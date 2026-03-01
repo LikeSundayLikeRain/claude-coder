@@ -1,7 +1,6 @@
 """Tests for repository implementations."""
 
 import tempfile
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -51,76 +50,36 @@ class TestUserRepository:
     """Test user repository."""
 
     async def test_create_and_get_user(self, user_repo):
-        """Test creating and retrieving user."""
-        user = UserModel(
-            user_id=12345,
-            telegram_username="testuser",
-            first_seen=datetime.now(UTC),
-            last_active=datetime.now(UTC),
-            is_allowed=True,
-        )
+        """Test creating and retrieving user via ensure_user + get_user."""
+        await user_repo.ensure_user(12345, "testuser")
 
-        # Create user
-        created_user = await user_repo.create_user(user)
-        assert created_user.user_id == 12345
-
-        # Get user
         retrieved_user = await user_repo.get_user(12345)
         assert retrieved_user is not None
         assert retrieved_user.user_id == 12345
         assert retrieved_user.telegram_username == "testuser"
-        assert retrieved_user.is_allowed == 1  # SQLite stores boolean as integer
 
     async def test_update_user(self, user_repo):
-        """Test updating user."""
-        user = UserModel(
-            user_id=12346,
-            telegram_username="testuser2",
-            first_seen=datetime.now(UTC),
-            last_active=datetime.now(UTC),
-            is_allowed=False,
-            total_cost=10.5,
-            message_count=5,
-        )
+        """Test updating session and directory for a user."""
+        await user_repo.ensure_user(12346, "testuser2")
 
-        await user_repo.create_user(user)
+        await user_repo.update_session(12346, "sess-xyz", "/home/user/project")
 
-        # Update user
-        user.total_cost = 20.0
-        user.message_count = 10
-        await user_repo.update_user(user)
-
-        # Verify update
         updated_user = await user_repo.get_user(12346)
-        assert updated_user.total_cost == 20.0
-        assert updated_user.message_count == 10
+        assert updated_user.session_id == "sess-xyz"
+        assert updated_user.directory == "/home/user/project"
 
     async def test_get_allowed_users(self, user_repo):
-        """Test getting allowed users."""
-        # Create allowed user
-        allowed_user = UserModel(
-            user_id=12347,
-            telegram_username="allowed",
-            first_seen=datetime.now(UTC),
-            last_active=datetime.now(UTC),
-            is_allowed=True,
-        )
-        await user_repo.create_user(allowed_user)
+        """Test that ensure_user creates rows that can be retrieved."""
+        await user_repo.ensure_user(12347, "allowed")
+        await user_repo.ensure_user(12348, "disallowed")
 
-        # Create disallowed user
-        disallowed_user = UserModel(
-            user_id=12348,
-            telegram_username="disallowed",
-            first_seen=datetime.now(UTC),
-            last_active=datetime.now(UTC),
-            is_allowed=False,
-        )
-        await user_repo.create_user(disallowed_user)
+        user1 = await user_repo.get_user(12347)
+        user2 = await user_repo.get_user(12348)
 
-        # Get allowed users
-        allowed_users = await user_repo.get_allowed_users()
-        assert 12347 in allowed_users
-        assert 12348 not in allowed_users
+        assert user1 is not None
+        assert user1.user_id == 12347
+        assert user2 is not None
+        assert user2.user_id == 12348
 
 
 class TestProjectThreadRepository:

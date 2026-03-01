@@ -529,6 +529,11 @@ class MessageOrchestrator:
         if client_manager:
             await client_manager.disconnect(user_id)
 
+        # Clear persisted session so cold-start won't restore it
+        storage = context.bot_data.get("storage")
+        if storage:
+            await storage.clear_user_session(user_id)
+
         # Eagerly connect so skills/commands are available immediately
         current_dir = context.user_data.get(
             "current_directory", self.settings.approved_directories[0]
@@ -879,22 +884,26 @@ class MessageOrchestrator:
                 if _active.session_id:
                     context.user_data["claude_session_id"] = _active.session_id
 
-        # Restore persisted directory if not already set
+        # Cold-start restoration: if user_data has never been populated
+        # (bot restarted), restore from the users table (single source of truth).
+        # Key absent = cold start. Key present with value None = explicit clear.
         storage = context.bot_data.get("storage")
-        if not context.user_data.get("current_directory") and storage:
-            persisted_dir = await storage.load_user_directory(user_id)
-            if persisted_dir:
-                persisted_path = Path(persisted_dir)
-                if persisted_path.is_dir() and any(
-                    persisted_path == r or persisted_path.is_relative_to(r)
-                    for r in self.settings.approved_directories
-                ):
-                    context.user_data["current_directory"] = persisted_path
-                    logger.debug(
-                        "Restored user directory from database",
-                        user_id=user_id,
-                        directory=str(persisted_path),
-                    )
+        if "claude_session_id" not in context.user_data and storage:
+            user_state = await storage.load_user_state(user_id)
+            if user_state:
+                if user_state.directory:
+                    dir_path = Path(user_state.directory)
+                    if dir_path.is_dir() and any(
+                        dir_path == r or dir_path.is_relative_to(r)
+                        for r in self.settings.approved_directories
+                    ):
+                        context.user_data["current_directory"] = dir_path
+                if user_state.session_id:
+                    context.user_data["claude_session_id"] = user_state.session_id
+                else:
+                    context.user_data["claude_session_id"] = None
+            else:
+                context.user_data["claude_session_id"] = None
 
         chat = update.message.chat
         await chat.send_action("typing")
@@ -914,9 +923,6 @@ class MessageOrchestrator:
         # Check if /new was used — skip auto-resume for this first message.
         # Flag is only cleared after a successful run so retries keep the intent.
         force_new = bool(context.user_data.get("force_new_session"))
-        # Implicit /new: if no session is set (e.g. after /repo), start fresh
-        if not force_new and session_id is None:
-            force_new = True
 
         # Independent typing heartbeat — stays alive even with no stream events
         heartbeat = self._start_typing_heartbeat(chat)
@@ -1471,9 +1477,6 @@ class MessageOrchestrator:
             # Execute via Claude
             user_id = query.from_user.id
             force_new = bool(context.user_data.get("force_new_session"))
-            # Implicit /new: if no session is set (e.g. after /repo), start fresh
-            if not force_new and session_id is None:
-                force_new = True
 
             skill_start_time = time.time()
             # Create a progress message for stream updates

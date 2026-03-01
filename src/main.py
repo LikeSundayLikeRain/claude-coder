@@ -174,7 +174,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         cli_path=config.claude_cli_path,
     )
     client_manager = ClientManager(
-        bot_session_repo=storage.bot_sessions,
+        user_repo=storage.users,
         options_builder=options_builder,
         idle_timeout=config.session_timeout_hours * 3600
         or DEFAULT_IDLE_TIMEOUT_SECONDS,
