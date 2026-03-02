@@ -6,8 +6,8 @@ from typing import Any, Dict, Optional
 import structlog
 
 from .database import DatabaseManager
-from .models import AuditLogModel, UserModel
-from .repositories import AuditLogRepository, ProjectThreadRepository, UserRepository
+from .models import AuditLogModel, ChatSessionModel
+from .repositories import AuditLogRepository, ChatSessionRepository
 
 logger = structlog.get_logger()
 
@@ -17,38 +17,52 @@ class Storage:
 
     def __init__(self, database_url: str):
         self.db_manager = DatabaseManager(database_url)
-        self.users = UserRepository(self.db_manager)
-        self.project_threads = ProjectThreadRepository(self.db_manager)
+        self.chat_sessions = ChatSessionRepository(self.db_manager)
         self.audit = AuditLogRepository(self.db_manager)
 
-    async def initialize(self):
+    async def initialize(self) -> None:
         await self.db_manager.initialize()
 
-    async def close(self):
+    async def close(self) -> None:
         await self.db_manager.close()
 
     async def health_check(self) -> bool:
         return await self.db_manager.health_check()
 
-    # --- User session state (single source of truth) ---
+    # --- Session convenience methods ---
 
-    async def save_user_session(self, user_id: int, session_id: str, directory: str) -> None:
-        """Persist session_id + directory together."""
-        await self.users.update_session(user_id, session_id, directory)
+    async def save_session(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        user_id: int,
+        directory: str,
+        session_id: Optional[str] = None,
+        topic_name: Optional[str] = None,
+    ) -> None:
+        """Persist or update a session."""
+        await self.chat_sessions.upsert(
+            chat_id=chat_id,
+            message_thread_id=message_thread_id,
+            user_id=user_id,
+            directory=directory,
+            session_id=session_id,
+            topic_name=topic_name,
+        )
 
-    async def load_user_state(self, user_id: int) -> Optional[UserModel]:
-        """Load user's persisted state (session_id + directory)."""
-        return await self.users.get_user(user_id)
+    async def load_session(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+    ) -> Optional[ChatSessionModel]:
+        """Load active session by PK."""
+        return await self.chat_sessions.get(chat_id, message_thread_id)
 
-    async def save_user_directory(self, user_id: int, directory: str) -> None:
-        """Update directory and clear session (used by /repo)."""
-        await self.users.update_directory(user_id, directory)
+    async def clear_session(self, chat_id: int, message_thread_id: int) -> None:
+        """Remove session row (used by /new)."""
+        await self.chat_sessions.delete(chat_id, message_thread_id)
 
-    async def clear_user_session(self, user_id: int) -> None:
-        """Clear session_id only (used by /new)."""
-        await self.users.clear_session(user_id)
-
-    # --- Audit ---
+    # --- Audit (unchanged) ---
 
     async def log_security_event(
         self,

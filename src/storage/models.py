@@ -27,53 +27,35 @@ def _parse_datetime(value: Any) -> Any:
 
 
 @dataclass
-class UserModel:
-    """User data model."""
+class ChatSessionModel:
+    """Unified session model — one row per (chat_id, message_thread_id).
 
-    user_id: int
-    telegram_username: Optional[str] = None
-    session_id: Optional[str] = None
-    directory: Optional[str] = None
+    Private DM: chat_id=user_id, message_thread_id=0, topic_name=None.
+    Group topic: chat_id=group_id, message_thread_id=topic_id, topic_name set.
+    """
 
-    @classmethod
-    def from_row(cls, row: aiosqlite.Row) -> "UserModel":
-        """Create from database row."""
-        data = dict(row)
-        return cls(**data)
-
-
-@dataclass
-class ProjectThreadModel:
-    """Project-thread mapping data model."""
-
-    project_slug: str
     chat_id: int
     message_thread_id: int
-    topic_name: str
+    user_id: int
+    directory: str
+    session_id: Optional[str] = None
+    topic_name: Optional[str] = None
     is_active: bool = True
     created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-    id: Optional[int] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
-        data = asdict(self)
-        for key in ["created_at", "updated_at"]:
-            if data[key]:
-                data[key] = data[key].isoformat()
-        return data
 
     @classmethod
-    def from_row(cls, row: aiosqlite.Row) -> "ProjectThreadModel":
+    def from_row(cls, row: aiosqlite.Row) -> "ChatSessionModel":
         """Create from database row."""
         data = dict(row)
+        return cls.from_row_dict(data)
 
-        for field in ["created_at", "updated_at"]:
-            val = data.get(field)
-            if val and isinstance(val, str):
-                data[field] = datetime.fromisoformat(val)
+    @classmethod
+    def from_row_dict(cls, data: dict) -> "ChatSessionModel":
+        """Create from a plain dict (useful in tests)."""
+        val = data.get("created_at")
+        if val and isinstance(val, str):
+            data["created_at"] = datetime.fromisoformat(val)
         data["is_active"] = bool(data.get("is_active", True))
-
         return cls(**data)
 
 

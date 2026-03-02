@@ -26,46 +26,66 @@ class TestStorageFacade:
         """Test storage initialization."""
         assert await storage.health_check()
 
-    async def test_save_and_load_user_session(self, storage):
+    async def test_save_and_load_session(self, storage):
         """Saving a session and loading it back returns the same values."""
-        await storage.users.ensure_user(12354)
-        await storage.save_user_session(12354, "sess-abc", "/home/user/project")
+        await storage.save_session(
+            chat_id=12354,
+            message_thread_id=0,
+            user_id=12354,
+            directory="/home/user/project",
+            session_id="sess-abc",
+        )
 
-        state = await storage.load_user_state(12354)
+        state = await storage.load_session(12354, 0)
         assert state is not None
         assert state.session_id == "sess-abc"
         assert state.directory == "/home/user/project"
 
-    async def test_load_user_state_returns_none_for_unknown_user(self, storage):
-        """load_user_state returns None when user has no row."""
-        state = await storage.load_user_state(99999)
+    async def test_load_session_returns_none_for_unknown(self, storage):
+        """load_session returns None when no row exists."""
+        state = await storage.load_session(99999, 0)
         assert state is None
 
-    async def test_save_user_directory_clears_session(self, storage):
-        """save_user_directory updates directory and clears session_id."""
-        await storage.users.ensure_user(12355)
-        await storage.save_user_session(12355, "sess-xyz", "/old/path")
-        await storage.save_user_directory(12355, "/new/path")
+    async def test_clear_session(self, storage):
+        """clear_session removes the session row."""
+        await storage.save_session(
+            chat_id=12356,
+            message_thread_id=0,
+            user_id=12356,
+            directory="/some/dir",
+            session_id="sess-to-clear",
+        )
+        await storage.clear_session(12356, 0)
 
-        state = await storage.load_user_state(12355)
-        assert state is not None
-        assert state.directory == "/new/path"
-        assert state.session_id is None
+        state = await storage.load_session(12356, 0)
+        assert state is None
 
-    async def test_clear_user_session(self, storage):
-        """clear_user_session removes session_id but keeps directory."""
-        await storage.users.ensure_user(12356)
-        await storage.save_user_session(12356, "sess-to-clear", "/some/dir")
-        await storage.clear_user_session(12356)
+    async def test_clear_session_does_not_affect_other_threads(self, storage):
+        """Clearing one thread's session leaves others intact."""
+        await storage.save_session(
+            chat_id=12357,
+            message_thread_id=0,
+            user_id=12357,
+            directory="/dir/a",
+            session_id="sess-a",
+        )
+        await storage.save_session(
+            chat_id=12357,
+            message_thread_id=1,
+            user_id=12357,
+            directory="/dir/b",
+            session_id="sess-b",
+        )
+        await storage.clear_session(12357, 0)
 
-        state = await storage.load_user_state(12356)
-        assert state is not None
-        assert state.session_id is None
-        assert state.directory == "/some/dir"
+        state_a = await storage.load_session(12357, 0)
+        state_b = await storage.load_session(12357, 1)
+        assert state_a is None
+        assert state_b is not None
+        assert state_b.session_id == "sess-b"
 
     async def test_log_security_event(self, storage):
         """Test logging security events."""
-        await storage.users.ensure_user(12352)
         await storage.log_security_event(
             user_id=12352,
             event_type="authentication_failure",
@@ -82,7 +102,6 @@ class TestStorageFacade:
 
     async def test_log_bot_event(self, storage):
         """Test logging bot events."""
-        await storage.users.ensure_user(12353)
         await storage.log_bot_event(
             user_id=12353,
             event_type="command_executed",

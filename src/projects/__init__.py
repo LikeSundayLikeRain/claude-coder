@@ -1,15 +1,7 @@
-"""Project registry and Telegram thread management."""
+"""Project thread management."""
 
-from .registry import ProjectDefinition, ProjectRegistry, load_project_registry
-from .thread_manager import (
-    PrivateTopicsUnavailableError,
-    ProjectThreadManager,
-)
+from .lifecycle import TopicLifecycleManager
+from .thread_manager import ProjectThreadManager
+from .topic_namer import generate_topic_name
 
-__all__ = [
-    "ProjectDefinition",
-    "ProjectRegistry",
-    "load_project_registry",
-    "ProjectThreadManager",
-    "PrivateTopicsUnavailableError",
-]
+__all__ = ["ProjectThreadManager", "TopicLifecycleManager", "generate_topic_name"]

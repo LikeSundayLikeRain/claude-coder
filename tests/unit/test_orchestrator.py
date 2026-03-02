@@ -44,10 +44,6 @@ def group_thread_settings(tmp_dir):
     return create_test_config(
         approved_directory=str(tmp_dir),
         agentic_mode=False,
-        enable_project_threads=True,
-        project_threads_mode="group",
-        project_threads_chat_id=-1001234567890,
-        projects_config_path=str(config_file),
     )
 
 
@@ -66,9 +62,6 @@ def private_thread_settings(tmp_dir):
     return create_test_config(
         approved_directory=str(tmp_dir),
         agentic_mode=False,
-        enable_project_threads=True,
-        project_threads_mode="private",
-        projects_config_path=str(config_file),
     )
 
 
@@ -83,7 +76,7 @@ def deps():
 
 
 def test_agentic_registers_commands(agentic_settings, deps):
-    """Agentic mode registers start, new, interrupt, status, compact, model, repo, resume, commands."""
+    """Agentic mode registers start, new, interrupt, status, compact, model, repo, resume, commands, add, remove, history."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     app = MagicMock()
     app.add_handler = MagicMock()
@@ -100,7 +93,7 @@ def test_agentic_registers_commands(agentic_settings, deps):
     ]
     commands = [h[0][0].commands for h in cmd_handlers]
 
-    assert len(cmd_handlers) == 9
+    assert len(cmd_handlers) == 11
     assert frozenset({"start"}) in commands
     assert frozenset({"new"}) in commands
     assert frozenset({"interrupt"}) in commands
@@ -110,10 +103,33 @@ def test_agentic_registers_commands(agentic_settings, deps):
     assert frozenset({"repo"}) in commands
     assert frozenset({"resume"}) in commands
     assert frozenset({"commands"}) in commands
+    assert frozenset({"remove"}) in commands
+    assert frozenset({"history"}) in commands
 
 
-def test_classic_registers_13_commands(classic_settings, deps):
-    """Classic mode registers all 13 commands."""
+def test_agentic_registers_remove(agentic_settings, deps):
+    """Agentic mode registers /remove command (no /add — replaced by /start wizard)."""
+    orchestrator = MessageOrchestrator(agentic_settings, deps)
+    app = MagicMock()
+    app.add_handler = MagicMock()
+
+    orchestrator._register_agentic_handlers(app)
+
+    from telegram.ext import CommandHandler
+
+    cmd_handlers = [
+        call
+        for call in app.add_handler.call_args_list
+        if isinstance(call[0][0], CommandHandler)
+    ]
+    commands = [h[0][0].commands for h in cmd_handlers]
+
+    assert frozenset({"add"}) not in commands
+    assert frozenset({"remove"}) in commands
+
+
+def test_classic_registers_14_commands(classic_settings, deps):
+    """Classic mode registers all 14 commands."""
     orchestrator = MessageOrchestrator(classic_settings, deps)
     app = MagicMock()
     app.add_handler = MagicMock()
@@ -128,7 +144,7 @@ def test_classic_registers_13_commands(classic_settings, deps):
         if isinstance(call[0][0], CommandHandler)
     ]
 
-    assert len(cmd_handlers) == 13
+    assert len(cmd_handlers) == 14
 
 
 def test_agentic_registers_text_document_photo_handlers(agentic_settings, deps):
@@ -159,31 +175,35 @@ def test_agentic_registers_text_document_photo_handlers(agentic_settings, deps):
 
 
 async def test_agentic_bot_commands(agentic_settings, deps):
-    """Agentic mode returns 9 bot commands."""
+    """Agentic mode returns a dict with private and group command sets."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
-    commands = await orchestrator.get_bot_commands()
+    result = await orchestrator.get_bot_commands()
 
-    assert len(commands) == 9
-    cmd_names = [c.command for c in commands]
-    assert cmd_names == [
-        "start",
-        "new",
-        "interrupt",
-        "status",
-        "compact",
-        "model",
-        "repo",
-        "resume",
-        "commands",
-    ]
+    assert isinstance(result, dict)
+    assert "private" in result
+    assert "group" in result
+
+    private_names = [c.command for c in result["private"]]
+    assert "start" in private_names
+    assert "new" in private_names
+    assert "interrupt" in private_names
+    assert "status" in private_names
+    assert "commands" in private_names
+
+    group_names = [c.command for c in result["group"]]
+    assert "start" in group_names
+    assert "status" in group_names
+    # Topic-specific commands (remove, history, etc.) are handled by
+    # the bot but not shown in the group autocomplete menu
+    assert "remove" not in group_names
 
 
 async def test_classic_bot_commands(classic_settings, deps):
-    """Classic mode returns 13 bot commands."""
+    """Classic mode returns 14 bot commands."""
     orchestrator = MessageOrchestrator(classic_settings, deps)
     commands = await orchestrator.get_bot_commands()
 
-    assert len(commands) == 13
+    assert len(commands) == 14
     cmd_names = [c.command for c in commands]
     assert "start" in cmd_names
     assert "help" in cmd_names
@@ -612,12 +632,11 @@ class TestTypingHeartbeat:
         assert "chat" not in sig.parameters
 
 
-async def test_group_thread_mode_rejects_non_forum_chat(group_thread_settings, deps):
-    """Strict thread mode rejects updates outside configured forum chat."""
+async def test_group_thread_mode_allows_non_configured_chat(group_thread_settings, deps):
+    """In group thread mode, messages from other chats are allowed through."""
     orchestrator = MessageOrchestrator(group_thread_settings, deps)
 
     project_threads_manager = MagicMock()
-    project_threads_manager.guidance_message.return_value = "Use project thread"
     deps["project_threads_manager"] = project_threads_manager
 
     called = {"value": False}
@@ -628,7 +647,7 @@ async def test_group_thread_mode_rejects_non_forum_chat(group_thread_settings, d
     wrapped = orchestrator._inject_deps(dummy_handler)
 
     update = MagicMock()
-    update.effective_chat.id = -1002222222
+    update.effective_chat.id = -1002222222  # different from configured -1001234567890
     update.effective_message.reply_text = AsyncMock()
     update.callback_query = None
 
@@ -638,55 +657,76 @@ async def test_group_thread_mode_rejects_non_forum_chat(group_thread_settings, d
 
     await wrapped(update, context)
 
+    # Non-configured chats are allowed through
+    assert called["value"] is True
+
+
+async def test_group_thread_mode_rejects_unbound_topic(group_thread_settings, deps):
+    """In the configured chat, topics not bound to a directory are rejected."""
+    orchestrator = MessageOrchestrator(group_thread_settings, deps)
+
+    project_threads_manager = MagicMock()
+    project_threads_manager.resolve_directory = AsyncMock(return_value=None)
+    deps["project_threads_manager"] = project_threads_manager
+
+    called = {"value": False}
+
+    async def dummy_handler(update, context):
+        called["value"] = True
+
+    wrapped = orchestrator._inject_deps(dummy_handler)
+
+    update = MagicMock()
+    update.effective_chat.id = -1001234567890  # configured chat
+    update.effective_chat.type = "supergroup"  # must be supergroup to trigger thread routing
+    update.effective_message.message_thread_id = 777
+    update.effective_message.direct_messages_topic = None
+    update.effective_message.reply_text = AsyncMock()
+    update.callback_query = None
+
+    context = MagicMock()
+    context.bot_data = {"project_threads_manager": project_threads_manager}
+    context.user_data = {}
+
+    await wrapped(update, context)
+
     assert called["value"] is False
     update.effective_message.reply_text.assert_called_once()
 
 
-async def test_thread_mode_loads_and_persists_thread_state(group_thread_settings, deps):
-    """Thread mode loads per-thread context and writes updates back."""
+async def test_thread_mode_loads_directory_from_mapping(group_thread_settings, deps):
+    """Thread mode resolves directory from mapping and sets current_directory."""
     orchestrator = MessageOrchestrator(group_thread_settings, deps)
 
     project_path = group_thread_settings.approved_directory / "project_a"
-    project = SimpleNamespace(
-        slug="project_a",
-        name="Project A",
-        absolute_path=project_path,
-    )
 
     project_threads_manager = MagicMock()
-    project_threads_manager.resolve_project = AsyncMock(return_value=project)
-    project_threads_manager.guidance_message.return_value = "Use project thread"
+    project_threads_manager.resolve_directory = AsyncMock(return_value=str(project_path))
     deps["project_threads_manager"] = project_threads_manager
 
+    captured = {"directory": None}
+
     async def dummy_handler(update, context):
-        assert context.user_data["claude_session_id"] == "old-session"
-        context.user_data["claude_session_id"] = "new-session"
+        captured["directory"] = context.user_data.get("current_directory")
 
     wrapped = orchestrator._inject_deps(dummy_handler)
 
     update = MagicMock()
     update.effective_chat.id = -1001234567890
+    update.effective_chat.type = "supergroup"  # must be supergroup to trigger thread routing
     update.effective_message.message_thread_id = 777
+    update.effective_message.direct_messages_topic = None
     update.effective_message.reply_text = AsyncMock()
     update.callback_query = None
 
     context = MagicMock()
-    context.bot_data = {}
-    context.user_data = {
-        "thread_state": {
-            "-1001234567890:777": {
-                "current_directory": str(project_path),
-                "claude_session_id": "old-session",
-            }
-        }
-    }
+    context.bot_data = {"project_threads_manager": project_threads_manager}
+    context.user_data = {}
 
     await wrapped(update, context)
 
-    assert (
-        context.user_data["thread_state"]["-1001234567890:777"]["claude_session_id"]
-        == "new-session"
-    )
+    project_threads_manager.resolve_directory.assert_awaited_once_with(-1001234567890, 777)
+    assert captured["directory"] == project_path
 
 
 async def test_sync_threads_bypasses_thread_gate(group_thread_settings, deps):
@@ -748,80 +788,67 @@ async def test_private_mode_start_bypasses_thread_gate(private_thread_settings, 
     project_threads_manager.resolve_project.assert_not_called()
 
 
-async def test_private_mode_start_inside_topic_uses_thread_context(
-    private_thread_settings, deps
+async def test_general_topic_sets_in_general_topic_flag(
+    group_thread_settings, deps
 ):
-    """/start in private topic should load mapped thread context."""
-    orchestrator = MessageOrchestrator(private_thread_settings, deps)
-    project_path = private_thread_settings.approved_directory / "project_a"
-    project = SimpleNamespace(
-        slug="project_a",
-        name="Project A",
-        absolute_path=project_path,
-    )
-    project_threads_manager = MagicMock()
-    project_threads_manager.resolve_project = AsyncMock(return_value=project)
-    project_threads_manager.guidance_message.return_value = "Use project topic"
-    deps["project_threads_manager"] = project_threads_manager
-
-    captured = {"dir": None}
-
-    async def start_command(update, context):
-        captured["dir"] = context.user_data.get("current_directory")
-
-    wrapped = orchestrator._inject_deps(start_command)
-
-    update = MagicMock()
-    update.effective_chat.type = "private"
-    update.effective_chat.id = 12345
-    update.effective_message.message_thread_id = 777
-    update.effective_message.reply_text = AsyncMock()
-    update.callback_query = None
-
-    context = MagicMock()
-    context.bot_data = {}
-    context.user_data = {
-        "thread_state": {
-            "12345:777": {
-                "current_directory": str(project_path),
-                "claude_session_id": "old",
-            }
-        }
-    }
-
-    await wrapped(update, context)
-
-    project_threads_manager.resolve_project.assert_awaited_once_with(12345, 777)
-    assert captured["dir"] == project_path
-
-
-async def test_private_mode_rejects_help_outside_topics(private_thread_settings, deps):
-    """Private mode rejects non-allowed commands outside mapped topics."""
-    orchestrator = MessageOrchestrator(private_thread_settings, deps)
-    called = {"value": False}
-
-    async def help_command(update, context):
-        called["value"] = True
+    """Messages in the general topic (no thread_id) set _in_general_topic flag."""
+    orchestrator = MessageOrchestrator(group_thread_settings, deps)
 
     project_threads_manager = MagicMock()
-    project_threads_manager.guidance_message.return_value = "Use project topic"
-    deps["project_threads_manager"] = project_threads_manager
 
-    wrapped = orchestrator._inject_deps(help_command)
+    captured = {"flag": None}
+
+    async def dummy_handler(update, context):
+        captured["flag"] = context.user_data.get("_in_general_topic")
+
+    wrapped = orchestrator._inject_deps(dummy_handler)
 
     update = MagicMock()
-    update.effective_chat.type = "private"
-    update.effective_chat.id = 12345
+    update.effective_chat.id = -1001234567890  # configured chat
+    update.effective_chat.type = "supergroup"  # must be supergroup to trigger thread routing
     update.effective_message.message_thread_id = None
     update.effective_message.direct_messages_topic = None
     update.effective_message.reply_text = AsyncMock()
     update.callback_query = None
 
     context = MagicMock()
-    context.bot_data = {}
+    context.bot_data = {"project_threads_manager": project_threads_manager}
     context.user_data = {}
 
     await wrapped(update, context)
 
-    assert called["value"] is False
-    update.effective_message.reply_text.assert_called_once()
+    assert captured["flag"] is True
+
+
+async def test_thread_topic_clears_in_general_topic_flag(
+    group_thread_settings, deps
+):
+    """Messages in a bound topic clear the _in_general_topic flag."""
+    orchestrator = MessageOrchestrator(group_thread_settings, deps)
+    project_path = group_thread_settings.approved_directory / "project_a"
+
+    project_threads_manager = MagicMock()
+    project_threads_manager.resolve_directory = AsyncMock(return_value=str(project_path))
+
+    captured = {"flag": "unset"}
+
+    async def dummy_handler(update, context):
+        captured["flag"] = context.user_data.get("_in_general_topic", "absent")
+
+    wrapped = orchestrator._inject_deps(dummy_handler)
+
+    update = MagicMock()
+    update.effective_chat.id = -1001234567890
+    update.effective_chat.type = "supergroup"  # must be supergroup to trigger thread routing
+    update.effective_message.message_thread_id = 777
+    update.effective_message.direct_messages_topic = None
+    update.effective_message.reply_text = AsyncMock()
+    update.callback_query = None
+
+    context = MagicMock()
+    context.bot_data = {"project_threads_manager": project_threads_manager}
+    context.user_data = {"_in_general_topic": True}
+
+    await wrapped(update, context)
+
+    assert captured["flag"] == "absent"

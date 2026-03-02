@@ -72,8 +72,9 @@ async def test_old_cd_callback_still_switches_directory(orchestrator, workspace)
     assert ctx.user_data["current_directory"] == workspace / "projectB"
     # Session should be cleared (no auto-resume)
     assert ctx.user_data["claude_session_id"] is None
-    # Should disconnect active client
-    client_mgr.disconnect.assert_called_once_with(123)
+    # Should disconnect active client (now called with user_id and old directory)
+    assert client_mgr.disconnect.called
+    assert client_mgr.disconnect.call_args[0][0] == 123
     query.edit_message_text.assert_called_once()
     text = query.edit_message_text.call_args[0][0]
     assert "Switched to" in text

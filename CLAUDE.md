@@ -30,16 +30,16 @@ uv run mypy src
 
 **Agentic mode** uses a layered client architecture:
 
-- `ClientManager` (`src/claude/client_manager.py`) — Manages persistent per-user `UserClient` actors with automatic session resolution. Actors self-remove on idle timeout via `on_exit` callback.
+- `ClientManager` (`src/claude/client_manager.py`) — Manages persistent per-(user, chat, thread) `UserClient` actors keyed by `(user_id, chat_id, message_thread_id)` for concurrent multi-topic sessions. Actors self-remove on idle timeout via `on_exit` callback.
 - `UserClient` (`src/claude/user_client.py`) — Actor-based Claude SDK client for one user. A long-lived asyncio task owns the full `connect → query → disconnect` lifecycle in a single task (required by the SDK's anyio cancel scopes). Public API: `start()`, `submit()`, `stop()`, `interrupt()`. Idle timeout built into the worker's `queue.get()`.
 - `OptionsBuilder` (`src/claude/options.py`) — Builds `ClaudeAgentOptions` from CLI settings (`~/.claude/settings.json`) with full feature parity: model selection, system prompt, permission mode, tool monitoring via `can_use_tool`, and `CLAUDECODE` env clearing.
 - `StreamHandler` (`src/claude/stream_handler.py`) — Extracts structured `StreamEvent`s from SDK messages (`ResultMessage`, `AssistantMessage`, `StreamEvent` partials).
-- `ProgressMessageManager` (`src/bot/progress.py`) — Rich progress display for Telegram. Maintains a persistent activity log message showing tool calls, thinking indicators, and reasoning snippets in real-time.
-- `SessionResolver` (`src/claude/session.py`) — Resolves session IDs from Claude CLI's `~/.claude/history.jsonl`, keyed by user+directory.
+- `ProgressMessageManager` (`src/bot/progress.py`) — Rich progress display for Telegram. Maintains a persistent activity log message showing narrative text, tool calls, and thinking indicators in real-time. Intermediate text appears inline (💬) so users can follow Claude's reasoning as it works; only the final text block is sent as the response message.
+- `SessionResolver` (`src/claude/session.py`) — Resolves session IDs from the `chat_sessions` DB table, keyed by `(user_id, chat_id, message_thread_id)`.
 
 **Classic mode** still uses `ClaudeIntegration` (facade in `src/claude/facade.py`) wrapping `ClaudeSDKManager` (`src/claude/sdk_integration.py`).
 
-Sessions auto-resume: per user+directory, read from Claude CLI's `~/.claude/history.jsonl`. Real-time streaming enabled via `include_partial_messages=True`. Native skill/plugin pass-through via `tools={"type": "preset", "preset": "claude_code"}` and `setting_sources=["user", "project"]`.
+Sessions auto-resume: per `(user_id, chat_id, message_thread_id)`, stored in the `chat_sessions` SQLite table. Real-time streaming enabled via `include_partial_messages=True`. Native skill/plugin pass-through via `tools={"type": "preset", "preset": "claude_code"}` and `setting_sources=["user", "project"]`.
 
 ### Request Flow
 
@@ -48,7 +48,8 @@ Sessions auto-resume: per user+directory, read from Claude CLI's `~/.claude/hist
 ```
 Telegram message -> Security middleware (group -3) -> Auth middleware (group -2)
 -> MessageOrchestrator.agentic_text() (group 10)
--> ClientManager.get_or_connect() -> UserClient.submit() -> actor processes query
+-> (chat_id, message_thread_id) routing — supergroups auto-detected, DMs use thread_id=0
+-> ClientManager.get_or_connect(user_id, chat_id, message_thread_id) -> UserClient.submit() -> actor processes query
 -> StreamHandler extracts events inside actor -> ProgressMessageManager renders real-time activity log
 -> Final response stored in SQLite -> Sent back to Telegram
 ```
@@ -84,9 +85,9 @@ context.bot_data["security_validator"]
 - `src/bot/middleware/` -- Auth, security input validation
 - `src/bot/features/` -- Git integration, file handling, quick actions, session export
 - `src/bot/orchestrator.py` -- MessageOrchestrator: routes to agentic or classic handlers, project-topic routing
-- `src/claude/` -- Claude integration: `client_manager.py` (per-user clients), `user_client.py` (SDK wrapper), `options.py` (SDK options builder), `stream_handler.py` (message parsing), `session.py` (session resolver), `monitor.py` (tool monitoring), `facade.py` (classic mode)
-- `src/projects/` -- Multi-project support: `registry.py` (YAML project config), `thread_manager.py` (Telegram topic sync/routing)
-- `src/storage/` -- SQLite via aiosqlite, repository pattern (users, sessions, messages, tool_usage, audit_log, project_threads, bot_sessions)
+- `src/claude/` -- Claude integration: `client_manager.py` (per-(user,chat,thread) clients), `user_client.py` (SDK wrapper), `options.py` (SDK options builder), `stream_handler.py` (message parsing), `session.py` (session resolver), `monitor.py` (tool monitoring), `facade.py` (classic mode), `transcript.py` (session transcript reader for history replay)
+- `src/projects/` -- Multi-project support: `thread_manager.py` (Telegram topic routing, auto-detected for supergroups), `lifecycle.py` (topic close/reopen/delete/rename lifecycle), `topic_namer.py` (Haiku-powered auto-naming after ~3 exchanges)
+- `src/storage/` -- SQLite via aiosqlite, repository pattern (`chat_sessions` and `audit_log` tables only)
 - `src/security/` -- Multi-provider auth (whitelist + token), input validators (with optional `disable_security_patterns`), audit logging
 - `src/events/` -- EventBus (async pub/sub), event types, AgentHandler, EventSecurityMiddleware
 - `src/api/` -- FastAPI webhook server, GitHub HMAC-SHA256 + Bearer token auth
@@ -111,7 +112,14 @@ Agentic platform settings: `AGENTIC_MODE` (default true), `ENABLE_API_SERVER`, `
 
 Security relaxation (trusted environments only): `DISABLE_SECURITY_PATTERNS` (default false), `DISABLE_TOOL_VALIDATION` (default false).
 
-Multi-project topics: `ENABLE_PROJECT_THREADS` (default false), `PROJECT_THREADS_MODE` (`private`|`group`), `PROJECT_THREADS_CHAT_ID` (required for group mode), `PROJECTS_CONFIG_PATH` (path to YAML project registry), `PROJECT_THREADS_SYNC_ACTION_INTERVAL_SECONDS` (default `1.1`, set `0` to disable pacing). See `config/projects.example.yaml`.
+Multi-project concurrent sessions: Topic routing is always active and auto-detected for Telegram supergroups with Topics enabled. Each forum topic is bound to exactly one session (1:1 model). Same directory can have multiple topics for different sessions. Private DMs use `(user_id, 0)`. No feature flag required — the bot detects the chat type automatically. Use `/start` in the General topic to create a project topic (wizard: pick dir → pick session → topic created with session bound). `/new` inside a topic creates a new topic for the same directory with a fresh session. `/remove` inside a topic permanently deletes it (requires double-confirmation; calls `delete_forum_topic`). `/status` in General shows a dashboard of active sessions.
+
+Topic lifecycle (managed by `TopicLifecycleManager` in `src/projects/lifecycle.py`):
+- Topics auto-close on idle timeout via `close_forum_topic`, and reopen automatically on the next message via `reopen_forum_topic`
+- Topics are auto-named by Haiku after ~3 exchanges via `edit_forum_topic` (see `src/projects/topic_namer.py`)
+- `/history [N]` shows a condensed session transcript in the topic (last N exchanges, default all)
+- `/remove` requires double-confirmation and permanently deletes the topic via `delete_forum_topic`
+- `/resume` is rejected inside topics (session is fixed per topic; use `/new` for a fresh topic)
 
 Feature flags in `src/config/features.py` control: MCP, git integration, file uploads, quick actions, session export, image uploads, conversation mode, agentic mode, API server, scheduler.
 
@@ -131,7 +139,7 @@ All datetimes use timezone-aware UTC: `datetime.now(UTC)` (not `datetime.utcnow(
 
 ### Agentic mode
 
-Agentic mode commands: `/start`, `/new`, `/interrupt`, `/status`, `/compact`, `/model`, `/repo`, `/resume`, `/commands`. Unrecognized `/commands` are passed through to Claude as skill invocations. If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`. To add a new command:
+Agentic mode commands: `/start`, `/new`, `/interrupt`, `/status`, `/compact`, `/model`, `/repo`, `/resume`, `/commands`. In supergroups with topics (auto-detected): `/start` (wizard: pick dir → session → creates topic), `/new` (creates new topic), `/remove`, `/history`, `/status` (dashboard). `/resume` is only available in DM and General topic. Unrecognized `/commands` are passed through to Claude as skill invocations. To add a new command:
 
 1. Add handler function in `src/bot/orchestrator.py`
 2. Register in `MessageOrchestrator._register_agentic_handlers()`

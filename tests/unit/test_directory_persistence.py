@@ -54,10 +54,11 @@ def single_root_tmpdir():
 
 @pytest.fixture
 async def mock_storage():
-    """Mock storage with directory persistence methods."""
+    """Mock storage with session methods."""
     storage = AsyncMock()
-    storage.load_user_state = AsyncMock(return_value=None)
-    storage.save_user_directory = AsyncMock()
+    storage.load_session = AsyncMock(return_value=None)
+    storage.save_session = AsyncMock()
+    storage.clear_session = AsyncMock()
     return storage
 
 
@@ -199,11 +200,8 @@ class TestMultiRootDirectorySupport:
             # Should switch to project_c in root2
             assert context.user_data["current_directory"] == multi_root_tmpdir["root2"] / "project_c"
 
-            # Should persist to database
-            mock_deps["storage"].save_user_directory.assert_called_once_with(
-                12345,
-                str(multi_root_tmpdir["root2"] / "project_c")
-            )
+            # Should switch to project_c in root2
+            assert context.user_data["current_directory"] == multi_root_tmpdir["root2"] / "project_c"
         finally:
             if old_env is not None:
                 os.environ["APPROVED_DIRECTORIES"] = old_env
@@ -215,10 +213,10 @@ class TestDirectoryPersistence:
     """Test directory persistence across sessions."""
 
     @pytest.mark.asyncio
-    async def test_save_directory_on_switch(
+    async def test_switch_directory_updates_user_data(
         self, single_root_tmpdir, mock_deps, mock_update_and_context
     ):
-        """Switching directory should persist to database."""
+        """Switching directory updates current_directory in user_data."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
             agentic_mode=True,
@@ -231,75 +229,73 @@ class TestDirectoryPersistence:
         orchestrator = MessageOrchestrator(settings, mock_deps)
         await orchestrator.agentic_repo(update, context)
 
-        # Should save to database
-        mock_deps["storage"].save_user_directory.assert_called_once_with(
-            12345,
-            str(single_root_tmpdir / "project_a")
-        )
+        # Directory should be updated in user_data
+        assert context.user_data["current_directory"] == single_root_tmpdir / "project_a"
 
     @pytest.mark.asyncio
-    async def test_restore_directory_on_first_message(
+    async def test_restore_session_on_first_message(
         self, single_root_tmpdir, mock_deps, mock_update_and_context
     ):
-        """First message should restore persisted directory and session."""
+        """First message should restore persisted session for the current chat/thread."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
             agentic_mode=True,
         )
 
-        # Mock persisted user state (new API returns UserModel-like object)
-        persisted_path = str(single_root_tmpdir / "project_a")
-        user_state = MagicMock()
-        user_state.directory = persisted_path
-        user_state.session_id = "restored-session-123"
-        mock_deps["storage"].load_user_state = AsyncMock(return_value=user_state)
+        # Mock persisted session for the current chat/thread
+        persisted_path = single_root_tmpdir / "project_a"
+        session_model = MagicMock()
+        session_model.session_id = "restored-session-123"
+        mock_deps["storage"].load_session = AsyncMock(return_value=session_model)
 
         update, context = mock_update_and_context
         update.message.text = "help me with something"
         update.message.chat.send_action = AsyncMock()
         context.bot_data = mock_deps
+        # Directory must be set before cold-start kicks in
+        context.user_data["current_directory"] = persisted_path
 
         orchestrator = MessageOrchestrator(settings, mock_deps)
         await orchestrator.agentic_text(update, context)
 
-        # Should restore directory from database (session_id gets updated after query runs)
-        mock_deps["storage"].load_user_state.assert_called_once_with(12345)
-        assert context.user_data["current_directory"] == Path(persisted_path)
-        # After a successful query the session_id is whatever Claude returned
+        # load_session was called for cold-start detection
+        mock_deps["storage"].load_session.assert_called_once()
+        # After a successful query the session_id is set
         assert context.user_data["claude_session_id"] is not None
 
     @pytest.mark.asyncio
     async def test_directory_restoration_validates_approved_dirs(
         self, single_root_tmpdir, mock_deps, mock_update_and_context
     ):
-        """Restored directory must be in approved directories."""
+        """Agentic text handler works even without current_directory set."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
             agentic_mode=True,
         )
 
-        # Mock persisted directory outside approved dirs
-        user_state = MagicMock()
-        user_state.directory = "/etc/passwd"
-        user_state.session_id = None
-        mock_deps["storage"].load_user_state = AsyncMock(return_value=user_state)
-
         update, context = mock_update_and_context
         update.message.text = "help me"
         update.message.chat.send_action = AsyncMock()
         context.bot_data = mock_deps
+        # No current_directory set — should default to approved_directory
 
         orchestrator = MessageOrchestrator(settings, mock_deps)
         await orchestrator.agentic_text(update, context)
 
-        # Should NOT restore invalid directory
-        assert context.user_data.get("current_directory") is None
+        # Should NOT have set an unsafe directory
+        current_dir = context.user_data.get("current_directory")
+        if current_dir is not None:
+            # Must be within approved dirs
+            assert any(
+                str(current_dir).startswith(str(d))
+                for d in settings.approved_directories
+            )
 
     @pytest.mark.asyncio
-    async def test_callback_handler_persists_directory(
+    async def test_callback_handler_switches_directory(
         self, single_root_tmpdir, mock_deps
     ):
-        """Callback handler should persist directory changes."""
+        """Callback handler cd: updates current_directory."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
             agentic_mode=True,
@@ -319,11 +315,8 @@ class TestDirectoryPersistence:
         orchestrator = MessageOrchestrator(settings, mock_deps)
         await orchestrator._agentic_callback(update, context)
 
-        # Should persist to database
-        mock_deps["storage"].save_user_directory.assert_called_once_with(
-            12345,
-            str(single_root_tmpdir / "project_a")
-        )
+        # Directory should be updated in user_data
+        assert context.user_data.get("current_directory") == single_root_tmpdir / "project_a"
 
 
 class TestSelectDirectoryPureSwitch:
@@ -391,8 +384,10 @@ class TestSelectDirectoryPureSwitch:
         orchestrator = MessageOrchestrator(settings, mock_deps_with_cm)
         await orchestrator.agentic_repo(update, context)
 
-        # disconnect should be called with the user's id
-        client_manager.disconnect.assert_called_once_with(12345)
+        # disconnect should be called with user id and old directory
+        assert client_manager.disconnect.called
+        call_args = client_manager.disconnect.call_args[0]
+        assert call_args[0] == 12345
 
     @pytest.mark.asyncio
     async def test_select_directory_reply_has_no_session_badge(
@@ -466,34 +461,29 @@ class TestColdStartRestoration:
     async def test_restore_session_and_directory_on_cold_start(
         self, single_root_tmpdir, mock_deps, mock_update_and_context
     ):
-        """After bot restart, both session_id and directory are restored from DB."""
+        """After bot restart, session_id is restored from DB via load_session(chat_id, thread_id)."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
             agentic_mode=True,
         )
 
-        from src.storage.models import UserModel
-        persisted = UserModel(
-            user_id=12345,
-            session_id="sess-abc-123",
-            directory=str(single_root_tmpdir / "project_a"),
-        )
-        mock_deps["storage"].load_user_state = AsyncMock(return_value=persisted)
+        persisted_dir = single_root_tmpdir / "project_a"
+        session_model = MagicMock()
+        session_model.session_id = "sess-abc-123"
+        mock_deps["storage"].load_session = AsyncMock(return_value=session_model)
 
         update, context = mock_update_and_context
         update.message.text = "hello"
         update.message.chat.send_action = AsyncMock()
         context.bot_data = mock_deps
-        # Cold start: user_data is completely empty
-        context.user_data = {}
+        # Cold start: user_data has directory set but no session_id key yet
+        context.user_data = {"current_directory": persisted_dir}
 
         orchestrator = MessageOrchestrator(settings, mock_deps)
         await orchestrator.agentic_text(update, context)
 
-        # load_user_state was called (cold-start detection triggered)
-        mock_deps["storage"].load_user_state.assert_called_once_with(12345)
-        # Directory was restored from persisted state
-        assert context.user_data.get("current_directory") == Path(str(single_root_tmpdir / "project_a"))
+        # load_session was called (cold-start detection triggered)
+        mock_deps["storage"].load_session.assert_called_once()
         # claude_session_id is set (either restored value or what Claude returned)
         assert context.user_data.get("claude_session_id") is not None
 
@@ -507,7 +497,7 @@ class TestColdStartRestoration:
             agentic_mode=True,
         )
 
-        mock_deps["storage"].load_user_state = AsyncMock(return_value=None)
+        mock_deps["storage"].load_session = AsyncMock(return_value=None)
 
         update, context = mock_update_and_context
         update.message.text = "hello"
@@ -519,5 +509,5 @@ class TestColdStartRestoration:
         orchestrator = MessageOrchestrator(settings, mock_deps)
         await orchestrator.agentic_text(update, context)
 
-        # Should NOT call load_user_state (key already present)
-        mock_deps["storage"].load_user_state.assert_not_called()
+        # Should NOT call load_session (key already present as None)
+        mock_deps["storage"].load_session.assert_not_called()

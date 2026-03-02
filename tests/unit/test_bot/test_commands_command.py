@@ -17,7 +17,6 @@ def mock_settings():
     settings.approved_directories = [Path("/test/workspace")]
     settings.approved_directory = Path("/test/workspace")
     settings.agentic_mode = True
-    settings.enable_project_threads = False
     return settings
 
 

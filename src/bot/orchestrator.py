@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from .attachments import Query
 
 from ..claude.client_manager import ClientManager
+from ..projects.lifecycle import TopicLifecycleManager
 from ..claude.history import (
     append_history_entry,
     check_history_format_health,
@@ -37,7 +38,6 @@ from ..claude.history import (
     read_session_transcript,
 )
 from ..config.settings import Settings
-from ..projects import PrivateTopicsUnavailableError
 from .progress import ProgressMessageManager, build_stream_callback
 from .utils.html_format import escape_html
 from .utils.repo_browser import (
@@ -71,125 +71,115 @@ class MessageOrchestrator:
             context.bot_data["settings"] = self.settings
             context.user_data.pop("_thread_context", None)
 
-            is_sync_bypass = handler.__name__ == "sync_threads"
+            is_management_bypass = handler.__name__ in {"sync_threads", "agentic_remove"}
             is_start_bypass = handler.__name__ in {"start_command", "agentic_start"}
             message_thread_id = self._extract_message_thread_id(update)
-            should_enforce = self.settings.enable_project_threads
 
-            if should_enforce:
-                if self.settings.project_threads_mode == "private":
-                    should_enforce = not is_sync_bypass and not (
-                        is_start_bypass and message_thread_id is None
-                    )
-                else:
-                    should_enforce = not is_sync_bypass
+            chat = update.effective_chat
+            is_supergroup = chat is not None and chat.type == "supergroup"
 
-            if should_enforce:
-                allowed = await self._apply_thread_routing_context(update, context)
-                if not allowed:
-                    return
-
-            try:
-                await handler(update, context)
-            finally:
+            if is_supergroup:
+                # Supergroup with topics — enforce thread routing
+                in_general = not message_thread_id
+                should_enforce = not is_management_bypass and not (
+                    is_start_bypass and in_general
+                )
                 if should_enforce:
-                    self._persist_thread_state(context)
+                    allowed = await self._apply_thread_routing_context(update, context)
+                    if not allowed:
+                        return
+                elif in_general:
+                    # Bypassed handlers still need the General flag
+                    context.user_data["_in_general_topic"] = True
+                elif message_thread_id:
+                    # Bypassed handler in a project topic — set context
+                    # without enforcement so /remove etc. can read it
+                    directory = ""
+                    manager = context.bot_data.get("project_threads_manager")
+                    if manager:
+                        directory = (
+                            await manager.resolve_directory(
+                                chat.id, message_thread_id
+                            )
+                            or ""
+                        )
+                    context.user_data["_thread_context"] = {
+                        "chat_id": chat.id,
+                        "message_thread_id": message_thread_id,
+                        "directory": directory,
+                    }
+            else:
+                # Private DM — set thread context for private chat
+                user_id = update.effective_user.id if update.effective_user else 0
+                current_dir = context.user_data.get(
+                    "current_directory", self.settings.approved_directories[0]
+                )
+                context.user_data["_thread_context"] = {
+                    "chat_id": user_id,
+                    "message_thread_id": 0,
+                    "directory": str(current_dir),
+                }
+
+            await handler(update, context)
 
         return wrapped
 
     async def _apply_thread_routing_context(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> bool:
-        """Enforce strict project-thread routing and load thread-local state."""
+        """Enforce project-thread routing and load thread-local directory state."""
         manager = context.bot_data.get("project_threads_manager")
         if manager is None:
-            await self._reject_for_thread_mode(
-                update,
-                "❌ <b>Project Thread Mode Misconfigured</b>\n\n"
-                "Thread manager is not initialized.",
-            )
-            return False
+            return True  # No manager = no thread routing
 
         chat = update.effective_chat
         message = update.effective_message
         if not chat or not message:
             return False
 
-        if self.settings.project_threads_mode == "group":
-            if chat.id != self.settings.project_threads_chat_id:
-                await self._reject_for_thread_mode(
-                    update,
-                    manager.guidance_message(mode=self.settings.project_threads_mode),
-                )
-                return False
-        else:
-            if getattr(chat, "type", "") != "private":
-                await self._reject_for_thread_mode(
-                    update,
-                    manager.guidance_message(mode=self.settings.project_threads_mode),
-                )
-                return False
-
         message_thread_id = self._extract_message_thread_id(update)
+
+        # General topic (no thread_id) — allow /add, /start, /status through
         if not message_thread_id:
+            context.user_data["_in_general_topic"] = True
+            return True
+
+        directory = await manager.resolve_directory(chat.id, message_thread_id)
+        if not directory:
             await self._reject_for_thread_mode(
-                update,
-                manager.guidance_message(mode=self.settings.project_threads_mode),
+                update, "This topic is not bound to a project. Use /add in General."
             )
             return False
 
-        project = await manager.resolve_project(chat.id, message_thread_id)
-        if not project:
-            await self._reject_for_thread_mode(
-                update,
-                manager.guidance_message(mode=self.settings.project_threads_mode),
-            )
-            return False
-
-        state_key = f"{chat.id}:{message_thread_id}"
-        thread_states = context.user_data.setdefault("thread_state", {})
-        state = thread_states.get(state_key, {})
-
-        project_root = project.absolute_path
-        current_dir_raw = state.get("current_directory")
-        current_dir = (
-            Path(current_dir_raw).resolve() if current_dir_raw else project_root
-        )
-        if not self._is_within(current_dir, project_root) or not current_dir.is_dir():
-            current_dir = project_root
-
-        context.user_data["current_directory"] = current_dir
-        context.user_data["claude_session_id"] = state.get("claude_session_id")
+        context.user_data["current_directory"] = Path(directory)
         context.user_data["_thread_context"] = {
             "chat_id": chat.id,
             "message_thread_id": message_thread_id,
-            "state_key": state_key,
-            "project_slug": project.slug,
-            "project_root": str(project_root),
-            "project_name": project.name,
+            "directory": directory,
         }
+        context.user_data.pop("_in_general_topic", None)
         return True
 
-    def _persist_thread_state(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Persist compatibility keys back into per-thread state."""
-        thread_context = context.user_data.get("_thread_context")
-        if not thread_context:
-            return
-
-        project_root = Path(thread_context["project_root"])
-        current_dir = context.user_data.get("current_directory", project_root)
-        if not isinstance(current_dir, Path):
-            current_dir = Path(str(current_dir))
-        current_dir = current_dir.resolve()
-        if not self._is_within(current_dir, project_root) or not current_dir.is_dir():
-            current_dir = project_root
-
-        thread_states = context.user_data.setdefault("thread_state", {})
-        thread_states[thread_context["state_key"]] = {
-            "current_directory": str(current_dir),
-            "claude_session_id": context.user_data.get("claude_session_id"),
-            "project_slug": thread_context["project_slug"],
-        }
+    @staticmethod
+    async def _post_to_topic(
+        update: Update,
+        text: str,
+        message_thread_id: int = 0,
+        parse_mode: Optional[str] = None,
+        reply_markup: Any = None,
+    ) -> Any:
+        """Send a message: post to topic in supergroups, reply in DMs."""
+        chat = update.effective_chat
+        if message_thread_id and chat and chat.type == "supergroup":
+            return await chat.send_message(
+                text,
+                message_thread_id=message_thread_id,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            )
+        return await update.message.reply_text(
+            text, parse_mode=parse_mode, reply_markup=reply_markup
+        )
 
     @staticmethod
     def _is_within(path: Path, root: Path) -> bool:
@@ -214,6 +204,16 @@ class MessageOrchestrator:
         if isinstance(topic_id, int) and topic_id > 0:
             return topic_id
         return None
+
+    def _resolve_chat_key(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> tuple[int, int]:
+        """Return (chat_id, message_thread_id) for the current context."""
+        thread_ctx = context.user_data.get("_thread_context")
+        if thread_ctx:
+            return thread_ctx["chat_id"], thread_ctx["message_thread_id"]
+        # Private DM fallback
+        return update.effective_user.id, 0
 
     async def _reject_for_thread_mode(self, update: Update, message: str) -> None:
         """Send a guidance response when strict thread routing rejects an update."""
@@ -252,9 +252,9 @@ class MessageOrchestrator:
             ("repo", self.agentic_repo),
             ("resume", self.agentic_resume),
             ("commands", self.agentic_commands),
+            ("remove", self.agentic_remove),
+            ("history", self.agentic_history),
         ]
-        if self.settings.enable_project_threads:
-            handlers.append(("sync_threads", command.sync_threads))
 
         for cmd, handler in handlers:
             app.add_handler(CommandHandler(cmd, self._inject_deps(handler)))
@@ -291,7 +291,7 @@ class MessageOrchestrator:
         app.add_handler(
             CallbackQueryHandler(
                 self._inject_deps(self._agentic_callback),
-                pattern=r"^(cd:|nav:|sel:|session:|skill:|model:)",
+                pattern=r"^(cd:|nav:|sel:|start_nav:|start_sel:|start_ses:|session:|skill:|model:)",
             )
         )
 
@@ -315,9 +315,8 @@ class MessageOrchestrator:
             ("export", command.export_session),
             ("actions", command.quick_actions),
             ("git", command.git_command),
+            ("sync_threads", command.sync_threads),
         ]
-        if self.settings.enable_project_threads:
-            handlers.append(("sync_threads", command.sync_threads))
 
         for cmd, handler in handlers:
             app.add_handler(CommandHandler(cmd, self._inject_deps(handler)))
@@ -345,24 +344,10 @@ class MessageOrchestrator:
 
         logger.info("Classic handlers registered (13 commands + full handler set)")
 
-    async def get_bot_commands(self) -> list:  # type: ignore[type-arg]
-        """Return bot commands appropriate for current mode."""
-        if self.settings.agentic_mode:
-            commands = [
-                BotCommand("start", "Start the bot"),
-                BotCommand("new", "Start a fresh session"),
-                BotCommand("interrupt", "Interrupt running query"),
-                BotCommand("status", "Show session status"),
-                BotCommand("compact", "Compress context, keep continuity"),
-                BotCommand("model", "Switch Claude model"),
-                BotCommand("repo", "List repos / switch workspace"),
-                BotCommand("resume", "Choose a session to resume"),
-                BotCommand("commands", "Browse available skills"),
-            ]
-            if self.settings.enable_project_threads:
-                commands.append(BotCommand("sync_threads", "Sync project topics"))
-            return commands
-        else:
+    async def get_bot_commands(self) -> Any:
+        """Return bot commands. Dict of scope->commands for private and group contexts."""
+        if not self.settings.agentic_mode:
+            # Classic mode
             commands = [
                 BotCommand("start", "Start bot and show help"),
                 BotCommand("help", "Show available commands"),
@@ -377,10 +362,33 @@ class MessageOrchestrator:
                 BotCommand("export", "Export current session"),
                 BotCommand("actions", "Show quick actions"),
                 BotCommand("git", "Git repository commands"),
+                BotCommand("sync_threads", "Sync project topics"),
             ]
-            if self.settings.enable_project_threads:
-                commands.append(BotCommand("sync_threads", "Sync project topics"))
             return commands
+
+        # Agentic mode
+        private_commands = [
+            BotCommand("start", "Start the bot"),
+            BotCommand("new", "Start a fresh session"),
+            BotCommand("interrupt", "Interrupt running query"),
+            BotCommand("status", "Show session status"),
+            BotCommand("compact", "Compress context"),
+            BotCommand("model", "Switch Claude model"),
+            BotCommand("repo", "List repos / switch workspace"),
+            BotCommand("resume", "Choose a session to resume"),
+            BotCommand("commands", "Browse available skills"),
+            BotCommand("history", "Show session transcript"),
+        ]
+
+        # Group menu shows only General topic commands — topic-specific
+        # commands (/interrupt, /compact, /remove, /history, etc.) are
+        # handled by the bot but don't appear in autocomplete.
+        group_commands = [
+            BotCommand("start", "Create a project topic"),
+            BotCommand("status", "Show active sessions"),
+        ]
+
+        return {"private": private_commands, "group": group_commands}
 
     # --- Agentic handlers ---
 
@@ -391,11 +399,12 @@ class MessageOrchestrator:
         if not update.effective_user or not update.message:
             return
         user_id = update.effective_user.id
+        chat_id, message_thread_id = self._resolve_chat_key(update, context)
         client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
         if client_manager:
-            client = client_manager.get_active_client(user_id)
+            client = client_manager.get_active_client(user_id, chat_id, message_thread_id)
             if client and client.is_querying:
-                await client_manager.interrupt(user_id)
+                await client_manager.interrupt(user_id, chat_id, message_thread_id)
                 await update.message.reply_text("Interrupting current query...")
                 return
         await update.message.reply_text("No active query to interrupt.")
@@ -447,9 +456,10 @@ class MessageOrchestrator:
             label += " 1M"
 
         user_id = query.from_user.id
+        chat_id, message_thread_id = self._resolve_chat_key(update, context)
         client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
         if client_manager:
-            await client_manager.set_model(user_id, model, betas)
+            await client_manager.set_model(user_id, chat_id, message_thread_id, model, betas)
             await query.edit_message_text(f"Model set to: {label}")
         else:
             await query.edit_message_text("Model switching is not available.")
@@ -457,42 +467,20 @@ class MessageOrchestrator:
     async def agentic_start(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Brief welcome, no buttons."""
+        """Start: welcome in DM/topic, wizard in supergroup General."""
         user = update.effective_user
-        sync_line = ""
-        if (
-            self.settings.enable_project_threads
-            and self.settings.project_threads_mode == "private"
-        ):
-            if (
-                not update.effective_chat
-                or getattr(update.effective_chat, "type", "") != "private"
-            ):
-                await update.message.reply_text(
-                    "🚫 <b>Private Topics Mode</b>\n\n"
-                    "Use this bot in a private chat and run <code>/start</code> there.",
-                    parse_mode="HTML",
-                )
-                return
-            manager = context.bot_data.get("project_threads_manager")
-            if manager:
-                try:
-                    result = await manager.sync_topics(
-                        context.bot,
-                        chat_id=update.effective_chat.id,
-                    )
-                    sync_line = (
-                        "\n\n🧵 Topics synced"
-                        f" (created {result.created}, reused {result.reused})."
-                    )
-                except PrivateTopicsUnavailableError:
-                    await update.message.reply_text(
-                        manager.private_topics_unavailable_message(),
-                        parse_mode="HTML",
-                    )
-                    return
-                except Exception:
-                    sync_line = "\n\n🧵 Topic sync failed. Run /sync_threads to retry."
+        chat = update.effective_chat
+
+        # Supergroup General topic — show directory browser (wizard step 1)
+        is_supergroup = chat is not None and chat.type == "supergroup"
+        message_thread_id = self._extract_message_thread_id(update)
+        in_general = is_supergroup and not message_thread_id
+
+        if in_general:
+            await self._start_wizard_dir_browser(update, context)
+            return
+
+        # DM or inside a topic — show welcome
         current_dir = context.user_data.get(
             "current_directory", self.settings.approved_directory
         )
@@ -508,41 +496,202 @@ class MessageOrchestrator:
             f"/interrupt — Interrupt running query\n"
             f"/status — Current session info\n"
             f"/model — Switch Claude model\n"
-            f"/resume — Pick a session to resume\n"
             f"/commands — Browse available skills\n"
             f"/compact — Compress context\n"
-            f"/repo — Switch workspace"
-            f"{sync_line}",
+            f"/repo — Switch workspace",
             parse_mode="HTML",
         )
+
+    async def _start_wizard_dir_browser(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Wizard step 1: show directory browser with start_ prefixed callbacks."""
+        browse_dir = self.settings.approved_directories[0]
+        multi_root = len(self.settings.approved_directories) > 1
+        keyboard_rows = build_browser_keyboard(browse_dir, browse_dir, multi_root=multi_root)
+
+        # Remap callbacks: sel: -> start_sel:, nav: -> start_nav:
+        remapped_rows = []
+        for row in keyboard_rows:
+            new_row = []
+            for btn in row:
+                data = btn.callback_data or ""
+                if data.startswith("sel:"):
+                    new_row.append(
+                        InlineKeyboardButton(
+                            btn.text, callback_data=f"start_sel:{data[4:]}"
+                        )
+                    )
+                elif data.startswith("nav:"):
+                    new_row.append(
+                        InlineKeyboardButton(
+                            btn.text, callback_data=f"start_nav:{data[4:]}"
+                        )
+                    )
+                else:
+                    new_row.append(btn)
+            remapped_rows.append(new_row)
+
+        await update.message.reply_text(
+            build_browse_header(browse_dir, browse_dir),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(remapped_rows),
+        )
+
+    async def _start_wizard_session_picker(
+        self,
+        message: Any,
+        directory: Path,
+        context: ContextTypes.DEFAULT_TYPE,
+        edit: bool = False,
+    ) -> None:
+        """Wizard step 2: show session picker for the selected directory."""
+        context.user_data["start_wizard_dir"] = str(directory)
+
+        history_entries = read_claude_history()
+        filtered_entries = filter_by_directory(history_entries, directory)
+        sorted_entries = sorted(
+            filtered_entries, key=lambda e: e.timestamp, reverse=True
+        )
+        # Dedupe by session_id — keep most recent entry per session
+        seen_ids: set[str] = set()
+        unique_entries: list = []
+        for entry in sorted_entries:
+            if entry.session_id not in seen_ids:
+                seen_ids.add(entry.session_id)
+                unique_entries.append(entry)
+        sorted_entries = unique_entries
+
+        keyboard_rows: List[list] = []
+
+        if sorted_entries:
+            for entry in sorted_entries[:8]:
+                time_str = relative_time(entry.timestamp)
+                first_msg = read_first_message(
+                    session_id=entry.session_id,
+                    project_dir=entry.project,
+                )
+                display_name = (
+                    first_msg or entry.display or entry.session_id[:12]
+                )[:40]
+                button_label = f"{time_str} — {display_name}"
+                keyboard_rows.append(
+                    [
+                        InlineKeyboardButton(
+                            button_label,
+                            callback_data=f"start_ses:{entry.session_id}",
+                        )
+                    ]
+                )
+
+        keyboard_rows.append(
+            [InlineKeyboardButton("+ New Session", callback_data="start_ses:new")]
+        )
+
+        reply_markup = InlineKeyboardMarkup(keyboard_rows)
+        dir_name = directory.name
+
+        if sorted_entries:
+            text = (
+                f"<b>Sessions in <code>{escape_html(dir_name)}/</code></b>\n\n"
+                f"Select a session to resume or start a new one:"
+            )
+        else:
+            text = (
+                f"<b>No sessions in <code>{escape_html(dir_name)}/</code></b>\n\n"
+                f"Start a new session:"
+            )
+
+        if edit:
+            await message.edit_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        else:
+            await message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
 
     async def agentic_new(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Start a fresh SDK session in the current directory."""
         user_id = update.effective_user.id
+        chat_id, message_thread_id = self._resolve_chat_key(update, context)
+
+        # In supergroup topic: create new topic for same dir (preserves 1:1 model)
+        chat = update.effective_chat
+        if chat and chat.type == "supergroup" and message_thread_id != 0:
+            current_dir = context.user_data.get(
+                "current_directory", self.settings.approved_directories[0]
+            )
+            manager = context.bot_data.get("project_threads_manager")
+            if manager:
+                dir_name = Path(str(current_dir)).name
+                existing = await manager.list_topics(chat.id)
+                existing_names = [t.topic_name for t in existing]
+                topic_name = manager.generate_topic_name(str(current_dir), existing_names)
+
+                try:
+                    mapping = await manager.create_topic(
+                        context.bot, chat.id, user_id, str(current_dir), topic_name
+                    )
+                    new_thread_id = mapping.message_thread_id
+
+                    # Eagerly connect new session
+                    client_manager_new: Optional[ClientManager] = context.bot_data.get(
+                        "client_manager"
+                    )
+                    if client_manager_new:
+                        client = await client_manager_new.get_or_connect(
+                            user_id=user_id,
+                            chat_id=chat.id,
+                            message_thread_id=new_thread_id,
+                            directory=str(current_dir),
+                            session_id=None,
+                            force_new=True,
+                            approved_directory=str(self.settings.approved_directories[0]),
+                        )
+                        # Rename with session snippet
+                        if client.session_id:
+                            new_name = f"{dir_name} — {client.session_id[:8]}"
+                            lifecycle_new: Optional[TopicLifecycleManager] = (
+                                context.bot_data.get("lifecycle_manager")
+                            )
+                            if lifecycle_new:
+                                await lifecycle_new.rename_topic(
+                                    context.bot, chat.id, new_thread_id, new_name
+                                )
+
+                    await update.message.reply_text(
+                        f"New session started in topic <b>{escape_html(topic_name)}</b>.",
+                        parse_mode="HTML",
+                    )
+                except Exception as e:
+                    logger.error("new_topic_creation_failed", error=str(e))
+                    await update.message.reply_text(
+                        f"Failed to create new topic: {str(e)[:200]}"
+                    )
+                return
+
         context.user_data["claude_session_id"] = None
         context.user_data["session_started"] = True
         context.user_data["force_new_session"] = True
 
+        current_dir = context.user_data.get(
+            "current_directory", self.settings.approved_directories[0]
+        )
+
         client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
         if client_manager:
-            await client_manager.disconnect(user_id)
+            await client_manager.disconnect(user_id, chat_id, message_thread_id)
 
         # Clear persisted session so cold-start won't restore it
         storage = context.bot_data.get("storage")
         if storage:
-            await storage.clear_user_session(user_id)
-
-        # Eagerly connect so skills/commands are available immediately
-        current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directories[0]
-        )
+            await storage.clear_session(chat_id, message_thread_id)
 
         if client_manager:
             try:
                 client = await client_manager.get_or_connect(
                     user_id=user_id,
+                    chat_id=chat_id,
+                    message_thread_id=message_thread_id,
                     directory=str(current_dir),
                     session_id=None,
                     force_new=True,
@@ -573,6 +722,31 @@ class MessageOrchestrator:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show current session status with workspace and session info."""
+        if not update.effective_user or not update.message:
+            return
+        user_id = update.effective_user.id
+
+        # General topic dashboard: show all active sessions across projects
+        if context.user_data.get("_in_general_topic"):
+            client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
+            if client_manager:
+                clients = client_manager.get_all_clients_for_user(user_id)
+                if clients:
+                    lines = ["<b>Active Sessions</b>\n"]
+                    for _chat_id, _thread_id, client in clients:
+                        name = escape_html(Path(client.directory).name)
+                        if client.is_querying:
+                            state = "querying"
+                        elif client.is_connected:
+                            state = "idle"
+                        else:
+                            state = "disconnected"
+                        lines.append(f"<b>{name}</b> — {state}")
+                    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+                    return
+            await update.message.reply_text("No active sessions.")
+            return
+
         current_dir = context.user_data.get(
             "current_directory", self.settings.approved_directory
         )
@@ -633,9 +807,10 @@ class MessageOrchestrator:
 
         # ClientManager info (model, connection state)
         client_line = ""
-        client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
+        chat_id, message_thread_id = self._resolve_chat_key(update, context)
+        client_manager = context.bot_data.get("client_manager")
         if client_manager:
-            active_client = client_manager.get_active_client(update.effective_user.id)
+            active_client = client_manager.get_active_client(update.effective_user.id, chat_id, message_thread_id)
             if active_client:
                 model_name = active_client.model or "default"
                 if active_client.is_querying:
@@ -806,8 +981,20 @@ class MessageOrchestrator:
         directory = str(current_dir)
         approved_dir = str(self.settings.approved_directory)
 
+        # Resolve chat key from context — _run_claude_query needs the context
+        # parameter that callers already pass through.
+        thread_ctx = context.user_data.get("_thread_context")
+        if thread_ctx:
+            chat_id = thread_ctx["chat_id"]
+            message_thread_id = thread_ctx["message_thread_id"]
+        else:
+            chat_id = user_id
+            message_thread_id = 0
+
         client = await client_manager.get_or_connect(
             user_id=user_id,
+            chat_id=chat_id,
+            message_thread_id=message_thread_id,
             directory=directory,
             session_id=None if force_new else session_id,
             approved_directory=approved_dir,
@@ -817,7 +1004,9 @@ class MessageOrchestrator:
         result = await client.submit(query, on_stream=on_stream)
 
         if result.session_id:
-            await client_manager.update_session_id(user_id, result.session_id)
+            await client_manager.update_session_id(
+                user_id, chat_id, message_thread_id, directory, result.session_id
+            )
 
         return ClaudeResponse(
             content=result.response_text,
@@ -874,51 +1063,48 @@ class MessageOrchestrator:
         from .utils.formatting import FormattedMessage, ResponseFormatter
 
         user_id = update.effective_user.id
+        chat_id, message_thread_id = self._resolve_chat_key(update, context)
 
         # Sync from active client (e.g. after API-driven /resume)
         _cm: Optional[ClientManager] = context.bot_data.get("client_manager")
         if _cm:
-            _active = _cm.get_active_client(user_id)
+            _active = _cm.get_active_client(user_id, chat_id, message_thread_id)
             if _active and _active.is_connected:
                 context.user_data["current_directory"] = Path(_active.directory)
                 if _active.session_id:
                     context.user_data["claude_session_id"] = _active.session_id
 
-        # Cold-start restoration: if user_data has never been populated
-        # (bot restarted), restore from the users table (single source of truth).
-        # Key absent = cold start. Key present with value None = explicit clear.
+        # Cold-start restoration — per (chat_id, message_thread_id)
         storage = context.bot_data.get("storage")
         if "claude_session_id" not in context.user_data and storage:
-            user_state = await storage.load_user_state(user_id)
-            if user_state:
-                if user_state.directory:
-                    dir_path = Path(user_state.directory)
-                    if dir_path.is_dir() and any(
-                        dir_path == r or dir_path.is_relative_to(r)
-                        for r in self.settings.approved_directories
-                    ):
-                        context.user_data["current_directory"] = dir_path
-                if user_state.session_id:
-                    context.user_data["claude_session_id"] = user_state.session_id
-                else:
-                    context.user_data["claude_session_id"] = None
+            session = await storage.load_session(chat_id, message_thread_id)
+            if session and session.session_id:
+                context.user_data["claude_session_id"] = session.session_id
             else:
                 context.user_data["claude_session_id"] = None
-
-        chat = update.message.chat
-        await chat.send_action("typing")
-
-        progress_msg = await update.message.reply_text("Working...")
-        start_time = time.time()
-        progress_manager = ProgressMessageManager(
-            initial_message=progress_msg, start_time=start_time
-        )
-        on_stream = build_stream_callback(progress_manager)
 
         current_dir = context.user_data.get(
             "current_directory", self.settings.approved_directories[0]
         )
         session_id = context.user_data.get("claude_session_id")
+
+        # Reopen topic if it was closed (idle timeout)
+        if message_thread_id != 0:
+            lifecycle: Optional[TopicLifecycleManager] = context.bot_data.get("lifecycle_manager")
+            if lifecycle:
+                await lifecycle.reopen(context.bot, chat_id, message_thread_id)
+
+        chat = update.message.chat
+        await chat.send_action("typing")
+
+        progress_msg = await self._post_to_topic(
+            update, "Working...", message_thread_id=message_thread_id
+        )
+        start_time = time.time()
+        progress_manager = ProgressMessageManager(
+            initial_message=progress_msg, start_time=start_time
+        )
+        on_stream = build_stream_callback(progress_manager)
 
         # Check if /new was used — skip auto-resume for this first message.
         # Flag is only cleared after a successful run so retries keep the intent.
@@ -964,6 +1150,65 @@ class MessageOrchestrator:
                 claude_response, context, self.settings, user_id
             )
 
+            # Auto-naming: rename topic after 3 messages if not yet named
+            # Keys namespaced by thread_id since chat_data is per-chat
+            named_key = f"_topic_named_{message_thread_id}"
+            count_key = f"_msg_count_{message_thread_id}"
+            recent_key = f"_recent_messages_{message_thread_id}"
+            if message_thread_id != 0 and not context.chat_data.get(named_key):
+                msg_count = context.chat_data.get(count_key, 0) + 1
+                context.chat_data[count_key] = msg_count
+
+                if msg_count >= 3:
+                    context.chat_data[named_key] = True  # prevent retries
+                    try:
+                        from ..projects.topic_namer import (
+                            generate_topic_name as gen_name,
+                        )
+
+                        # Collect recent messages from this conversation
+                        recent = context.chat_data.get(recent_key, [])
+                        recent.append((query.text or "")[:200])
+                        if claude_response.content:
+                            recent.append(claude_response.content[:200])
+
+                        dir_name = Path(str(current_dir)).name
+                        api_key = self.settings.anthropic_api_key_str
+                        haiku_name = await gen_name(recent, dir_name, api_key=api_key)
+
+                        if haiku_name:
+                            lifecycle_auto: Optional[TopicLifecycleManager] = (
+                                context.bot_data.get("lifecycle_manager")
+                            )
+                            if lifecycle_auto:
+                                await lifecycle_auto.rename_topic(
+                                    context.bot, chat_id, message_thread_id, haiku_name
+                                )
+                                # Update DB
+                                if storage:
+                                    await storage.save_session(
+                                        chat_id=chat_id,
+                                        message_thread_id=message_thread_id,
+                                        user_id=user_id,
+                                        directory=str(current_dir),
+                                        topic_name=haiku_name,
+                                    )
+                                logger.info(
+                                    "topic_auto_named",
+                                    chat_id=chat_id,
+                                    message_thread_id=message_thread_id,
+                                    name=haiku_name,
+                                )
+                    except Exception as e:
+                        logger.warning("auto_naming_failed", error=str(e))
+                else:
+                    # Track messages for naming context
+                    recent = context.chat_data.get(recent_key, [])
+                    recent.append((query.text or "")[:200])
+                    if claude_response.content:
+                        recent.append(claude_response.content[:200])
+                    context.chat_data[recent_key] = recent[-12:]  # keep last 12
+
             # Format response (no reply_markup — strip keyboards)
             formatter = ResponseFormatter(self.settings)
             formatted_messages = formatter.format_claude_response(
@@ -985,10 +1230,11 @@ class MessageOrchestrator:
             if not message.text or not message.text.strip():
                 continue
             try:
-                await update.message.reply_text(
+                await self._post_to_topic(
+                    update,
                     message.text,
+                    message_thread_id=message_thread_id,
                     parse_mode=message.parse_mode,
-                    reply_markup=None,  # No keyboards in agentic mode
                 )
                 if i < len(formatted_messages) - 1:
                     await asyncio.sleep(0.5)
@@ -999,15 +1245,18 @@ class MessageOrchestrator:
                     message_index=i,
                 )
                 try:
-                    await update.message.reply_text(
+                    await self._post_to_topic(
+                        update,
                         message.text,
-                        reply_markup=None,
+                        message_thread_id=message_thread_id,
                     )
                 except Exception as plain_err:
-                    await update.message.reply_text(
+                    await self._post_to_topic(
+                        update,
                         f"Failed to deliver response "
                         f"(Telegram error: {str(plain_err)[:150]}). "
                         f"Please try again.",
+                        message_thread_id=message_thread_id,
                     )
 
         return success
@@ -1027,6 +1276,12 @@ class MessageOrchestrator:
             message_length=len(message_text),
         )
 
+        # Clear pending /remove confirmation on any non-command message
+        thread_ctx = context.user_data.get("_thread_context")
+        if thread_ctx:
+            tid = thread_ctx.get("message_thread_id", 0)
+            context.chat_data.pop(f"_pending_remove_{tid}", None)
+
         # Check if this is a skill invocation (e.g., "/skillname args")
         # Skip if it's a registered bot command — pass verbatim to CLI
         if message_text.startswith("/"):
@@ -1043,9 +1298,10 @@ class MessageOrchestrator:
                     "compact",
                     "model",
                     "repo",
-                    "sessions",
+                    "resume",
                     "commands",
-                    "sync_threads",
+                    "remove",
+                    "history",
                 }
 
                 if potential_skill_name not in registered_commands:
@@ -1055,8 +1311,15 @@ class MessageOrchestrator:
                     _cm_check: Optional[ClientManager] = context.bot_data.get(
                         "client_manager"
                     )
+                    _chat_id_check, _thread_id_check = self._resolve_chat_key(
+                        update, context
+                    )
                     _active = (
-                        _cm_check.get_active_client(user_id) if _cm_check else None
+                        _cm_check.get_active_client(
+                            user_id, _chat_id_check, _thread_id_check
+                        )
+                        if _cm_check
+                        else None
                     )
                     if _active and _active.has_command(potential_skill_name):
                         logger.info(
@@ -1201,12 +1464,15 @@ class MessageOrchestrator:
                 )
             else:
                 # Leaf — select it
+                _sel_chat_id, _sel_thread_id = self._resolve_chat_key(update, context)
                 await self._select_directory(
                     update.message,
                     target_path,
                     storage,
                     context,
                     user_id=update.effective_user.id,
+                    chat_id=_sel_chat_id,
+                    message_thread_id=_sel_thread_id,
                 )
             return
 
@@ -1268,21 +1534,20 @@ class MessageOrchestrator:
         context: ContextTypes.DEFAULT_TYPE,
         edit: bool = False,
         user_id: Optional[int] = None,
+        chat_id: Optional[int] = None,
+        message_thread_id: Optional[int] = None,
     ) -> None:
         """Select a directory: set as working dir, disconnect active session."""
         context.user_data["current_directory"] = target_path
-
-        if storage and user_id:
-            await storage.save_user_directory(user_id, str(target_path))
 
         # Clear session — user must /new or /resume explicitly.
         context.user_data["claude_session_id"] = None
         context.user_data["force_new_session"] = False
 
-        # Disconnect active SDK session
+        # Disconnect active SDK session for the current chat key
         client_manager = context.bot_data.get("client_manager")
-        if client_manager and user_id:
-            await client_manager.disconnect(user_id)
+        if client_manager and user_id and chat_id is not None and message_thread_id is not None:
+            await client_manager.disconnect(user_id, chat_id, message_thread_id)
 
         is_git = (target_path / ".git").is_dir()
         git_badge = " (git)" if is_git else ""
@@ -1301,11 +1566,12 @@ class MessageOrchestrator:
     ) -> None:
         """Show available skills as inline keyboard buttons."""
         user_id = update.effective_user.id
+        chat_id, message_thread_id = self._resolve_chat_key(update, context)
         client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
 
         commands: list[dict] = []
         if client_manager:
-            commands = client_manager.get_available_commands(user_id)
+            commands = client_manager.get_available_commands(user_id, chat_id, message_thread_id)
 
         if not commands:
             await update.message.reply_text(
@@ -1358,10 +1624,116 @@ class MessageOrchestrator:
             reply_markup=reply_markup,
         )
 
+    async def agentic_remove(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Remove this topic — double-confirm then delete permanently."""
+        if not update.message or not update.effective_user:
+            return
+        thread_ctx = context.user_data.get("_thread_context")
+        if not thread_ctx:
+            await update.message.reply_text("Use /remove inside a project topic.")
+            return
+
+        user_id = update.effective_user.id
+        chat_id = thread_ctx["chat_id"]
+        message_thread_id = thread_ctx["message_thread_id"]
+
+        # Double-confirm gate (namespaced by thread_id)
+        remove_key = f"_pending_remove_{message_thread_id}"
+        if not context.chat_data.get(remove_key):
+            context.chat_data[remove_key] = True
+            await update.message.reply_text(
+                "\u26a0\ufe0f This will <b>permanently delete</b> this topic and all messages.\n\n"
+                "Send <code>/remove</code> again to confirm.",
+                parse_mode="HTML",
+            )
+            return
+
+        # Confirmed — proceed with deletion
+        context.chat_data.pop(remove_key, None)
+
+        # Disconnect client
+        client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
+        if client_manager:
+            await client_manager.disconnect(user_id, chat_id, message_thread_id)
+
+        # Deactivate DB row
+        manager = context.bot_data.get("project_threads_manager")
+        if manager:
+            await manager.repository.deactivate(chat_id, message_thread_id)
+
+        # Delete topic (falls back to close)
+        lifecycle: Optional[TopicLifecycleManager] = context.bot_data.get("lifecycle_manager")
+        if lifecycle:
+            await lifecycle.delete_confirmed(context.bot, chat_id, message_thread_id)
+        else:
+            # Fallback: just close
+            try:
+                await context.bot.close_forum_topic(
+                    chat_id=chat_id, message_thread_id=message_thread_id
+                )
+            except Exception:
+                pass
+
+        logger.info("topic_deleted", chat_id=chat_id, message_thread_id=message_thread_id)
+
+    async def agentic_history(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show session transcript history in this topic."""
+        if not update.message or not update.effective_user:
+            return
+
+        chat_id, message_thread_id = self._resolve_chat_key(update, context)
+        storage = context.bot_data.get("storage")
+
+        # Parse optional limit argument
+        args = update.message.text.split()[1:] if update.message.text else []
+        last_n = None
+        if args:
+            try:
+                last_n = int(args[0])
+            except ValueError:
+                await update.message.reply_text("Usage: /history [N]")
+                return
+
+        # Resolve session
+        session = await storage.load_session(chat_id, message_thread_id) if storage else None
+        if not session or not session.session_id:
+            await update.message.reply_text("No active session in this topic.")
+            return
+
+        from src.claude.transcript import format_condensed, read_full_transcript
+
+        entries = read_full_transcript(session.session_id, session.directory)
+        if not entries:
+            await update.message.reply_text(
+                f"No transcript available for session <code>{session.session_id[:8]}...</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        messages = format_condensed(entries, last_n=last_n)
+        for msg in messages:
+            await update.message.reply_text(msg)
+
     async def agentic_resume(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show session picker for current directory."""
+        # In supergroup topic: session is fixed (1:1 model)
+        chat = update.effective_chat
+        if chat and chat.type == "supergroup":
+            thread_ctx = context.user_data.get("_thread_context")
+            if thread_ctx and thread_ctx.get("message_thread_id", 0) != 0:
+                await update.message.reply_text(
+                    "Session is fixed per topic. Use /new to start a new topic, "
+                    "or /start in General to resume a different session.",
+                    parse_mode="HTML",
+                )
+                return
+
         # Get current directory
         current_directory = context.user_data.get("current_directory")
         if not current_directory:
@@ -1650,6 +2022,7 @@ class MessageOrchestrator:
                 await query.edit_message_text("Access denied.", parse_mode="HTML")
                 return
 
+            _sel_chat_id, _sel_thread_id = self._resolve_chat_key(update, context)
             await self._select_directory(
                 query.message,
                 target_path,
@@ -1657,6 +2030,8 @@ class MessageOrchestrator:
                 context,
                 edit=True,
                 user_id=query.from_user.id,
+                chat_id=_sel_chat_id,
+                message_thread_id=_sel_thread_id,
             )
 
             # Audit log
@@ -1670,8 +2045,258 @@ class MessageOrchestrator:
                 )
             return
 
+        # Handle start_nav: callbacks (navigate in /start wizard browser)
+        if prefix == "start_nav":
+            roots = self.settings.approved_directories
+            add_browse_root = context.user_data.get("add_browse_root", roots[0])
+            if add_browse_root not in roots:
+                add_browse_root = roots[0]
+                context.user_data["add_browse_root"] = add_browse_root
+            add_browse_rel = context.user_data.get("add_browse_rel", "")
+
+            if value == "..":
+                if add_browse_rel:
+                    parent_rel = str(Path(add_browse_rel).parent)
+                    new_rel = "" if parent_rel == "." else parent_rel
+                else:
+                    new_rel = ""
+                context.user_data["add_browse_rel"] = new_rel
+            else:
+                browse_dir = (add_browse_root / value).resolve()
+                if not browse_dir.is_dir() or not browse_dir.is_relative_to(add_browse_root):
+                    await query.edit_message_text(
+                        f"Directory not found: <code>{escape_html(value)}</code>",
+                        parse_mode="HTML",
+                    )
+                    return
+                context.user_data["add_browse_rel"] = str(
+                    browse_dir.relative_to(add_browse_root)
+                )
+                context.user_data["add_browse_root"] = add_browse_root
+
+            add_browse_rel = context.user_data["add_browse_rel"]
+            browse_dir = add_browse_root / add_browse_rel if add_browse_rel else add_browse_root
+
+            # Rebuild keyboard with start_ prefixes
+            keyboard_rows = build_browser_keyboard(browse_dir, add_browse_root, multi_root=len(roots) > 1)
+            remapped_rows = []
+            for row in keyboard_rows:
+                new_row = []
+                for btn in row:
+                    data = btn.callback_data or ""
+                    if data.startswith("sel:"):
+                        new_row.append(InlineKeyboardButton(btn.text, callback_data=f"start_sel:{data[4:]}"))
+                    elif data.startswith("nav:"):
+                        new_row.append(InlineKeyboardButton(btn.text, callback_data=f"start_nav:{data[4:]}"))
+                    else:
+                        new_row.append(btn)
+                remapped_rows.append(new_row)
+
+            await query.edit_message_text(
+                build_browse_header(browse_dir, add_browse_root),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(remapped_rows),
+            )
+            return
+
+        # Handle start_sel: callbacks (select directory in /start wizard)
+        if prefix == "start_sel":
+            roots = self.settings.approved_directories
+            add_browse_root = context.user_data.get("add_browse_root", roots[0])
+            if add_browse_root not in roots:
+                add_browse_root = roots[0]
+            add_browse_rel = context.user_data.get("add_browse_rel", "")
+
+            if value == ".":
+                target_path = add_browse_root / add_browse_rel if add_browse_rel else add_browse_root
+            else:
+                target_path = (add_browse_root / value).resolve()
+
+            if not target_path.is_dir():
+                await query.edit_message_text(
+                    f"Directory not found: <code>{escape_html(value)}</code>",
+                    parse_mode="HTML",
+                )
+                return
+
+            if not any(target_path == r or target_path.is_relative_to(r) for r in roots):
+                await query.edit_message_text("Access denied.", parse_mode="HTML")
+                return
+
+            await self._start_wizard_session_picker(
+                query.message, target_path, context, edit=True
+            )
+            return
+
+        # Handle start_ses: callbacks (wizard step 3 — create topic + connect)
+        if prefix == "start_ses":
+            wizard_dir = context.user_data.get("start_wizard_dir")
+            if not wizard_dir:
+                await query.edit_message_text("Session expired. Use /start again.")
+                return
+
+            chat_id = query.message.chat.id if query.message else 0
+            user_id = query.from_user.id
+            directory = wizard_dir
+            dir_name = Path(directory).name
+            session_id: Optional[str] = value if value != "new" else None
+
+            manager = context.bot_data.get("project_threads_manager")
+            if not manager:
+                await query.edit_message_text("Project threads not configured.")
+                return
+
+            # Check if a topic already exists for this session
+            if session_id and manager.repository:
+                existing = await manager.repository.find_by_session_id(
+                    chat_id, session_id
+                )
+                if existing:
+                    topic_link = (
+                        f"https://t.me/c/{str(chat_id).removeprefix('-100')}"
+                        f"/{existing.message_thread_id}"
+                    )
+                    topic_label = existing.topic_name or dir_name
+                    await query.edit_message_text(
+                        f"Session already has a topic: "
+                        f"<a href=\"{topic_link}\">{escape_html(topic_label)}</a>",
+                        parse_mode="HTML",
+                    )
+                    # Cleanup wizard state
+                    context.user_data.pop("start_wizard_dir", None)
+                    context.user_data.pop("start_browse_root", None)
+                    context.user_data.pop("start_browse_rel", None)
+                    return
+
+            # Generate topic name
+            if session_id:
+                # Existing session — try Haiku name from transcript
+                from ..projects.topic_namer import (
+                    generate_topic_name as gen_name,
+                )
+
+                transcript = read_session_transcript(
+                    session_id, directory, limit=3
+                )
+                messages = [m.text for m in transcript if m.text]
+                api_key = self.settings.anthropic_api_key_str
+                haiku_name = (
+                    await gen_name(messages, dir_name, api_key=api_key)
+                    if messages
+                    else None
+                )
+                topic_name = haiku_name or f"{dir_name} — {session_id[:8]}"
+            else:
+                topic_name = dir_name
+
+            # Avoid collision with existing topic names
+            existing = await manager.list_topics(chat_id)
+            existing_names = [t.topic_name for t in existing]
+            final_name = manager.generate_topic_name(
+                directory, existing_names, override_name=topic_name
+            )
+
+            await query.edit_message_text(
+                f"Creating topic <b>{escape_html(final_name)}</b>...",
+                parse_mode="HTML",
+            )
+
+            try:
+                mapping = await manager.create_topic(
+                    context.bot,
+                    chat_id,
+                    user_id,
+                    directory,
+                    final_name,
+                    session_id=session_id,
+                )
+                thread_id = mapping.message_thread_id
+
+                # Eagerly connect
+                client_manager: Optional[ClientManager] = context.bot_data.get(
+                    "client_manager"
+                )
+                if client_manager:
+                    client = await client_manager.get_or_connect(
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        message_thread_id=thread_id,
+                        directory=directory,
+                        session_id=session_id,
+                        force_new=(session_id is None),
+                        approved_directory=str(
+                            self.settings.approved_directories[0]
+                        ),
+                    )
+                    # For new sessions, rename topic with session snippet
+                    if session_id is None and client.session_id:
+                        new_name = f"{dir_name} — {client.session_id[:8]}"
+                        lifecycle_wiz: Optional[TopicLifecycleManager] = (
+                            context.bot_data.get("lifecycle_manager")
+                        )
+                        if lifecycle_wiz:
+                            await lifecycle_wiz.rename_topic(
+                                context.bot, chat_id, thread_id, new_name
+                            )
+                        await manager.repository.upsert(
+                            chat_id=chat_id,
+                            message_thread_id=thread_id,
+                            user_id=user_id,
+                            directory=directory,
+                            topic_name=new_name,
+                            session_id=client.session_id,
+                        )
+
+                await query.message.reply_text(
+                    f"Topic <b>{escape_html(final_name)}</b> created "
+                    f"→ <code>{escape_html(directory)}</code>",
+                    parse_mode="HTML",
+                )
+
+                # Send brief transcript preview for existing sessions
+                if session_id:
+                    try:
+                        from src.claude.transcript import (
+                            format_condensed,
+                            read_full_transcript,
+                        )
+
+                        entries = read_full_transcript(session_id, directory)
+                        if entries:
+                            # Single message with as much recent history as fits
+                            history_messages = format_condensed(
+                                entries, last_n=20
+                            )
+                            if history_messages:
+                                await context.bot.send_message(
+                                    chat_id=chat_id,
+                                    text=history_messages[-1],
+                                    message_thread_id=thread_id,
+                                )
+                            # Mark as replayed so _execute_query skips it
+                            context.chat_data[
+                                f"_history_replayed_{thread_id}"
+                            ] = True
+                    except Exception as e:
+                        logger.debug(
+                            "wizard_transcript_send_failed", error=str(e)
+                        )
+
+            except Exception as e:
+                logger.error("start_wizard_create_failed", error=str(e))
+                await query.message.reply_text(
+                    f"Failed to create topic: {str(e)[:200]}"
+                )
+
+            # Cleanup wizard state
+            context.user_data.pop("start_wizard_dir", None)
+            context.user_data.pop("start_browse_root", None)
+            context.user_data.pop("start_browse_rel", None)
+            return
+
         # Handle session callbacks
         if prefix == "session":
+            _ses_chat_id, _ses_thread_id = self._resolve_chat_key(update, context)
             if value == "new":
                 context.user_data["force_new_session"] = True
                 # Eager connect like /new
@@ -1684,6 +2309,8 @@ class MessageOrchestrator:
                     try:
                         client = await client_manager.get_or_connect(
                             user_id=query.from_user.id,
+                            chat_id=_ses_chat_id,
+                            message_thread_id=_ses_thread_id,
                             directory=str(current_dir),
                             session_id=None,
                             force_new=True,
@@ -1711,6 +2338,8 @@ class MessageOrchestrator:
                     try:
                         await client_manager.switch_session(
                             user_id=query.from_user.id,
+                            chat_id=_ses_chat_id,
+                            message_thread_id=_ses_thread_id,
                             session_id=value,
                             directory=str(current_dir),
                             approved_directory=str(
@@ -1792,20 +2421,17 @@ class MessageOrchestrator:
 
         context.user_data["current_directory"] = new_path
 
-        # Persist to database
-        if storage:
-            await storage.save_user_directory(query.from_user.id, str(new_path))
-
         # Clear session — user must /new or /resume explicitly
         context.user_data["claude_session_id"] = None
         context.user_data["force_new_session"] = False
 
-        # Disconnect active SDK session
+        # Disconnect active SDK session for the current chat key
+        _cd_chat_id, _cd_thread_id = self._resolve_chat_key(update, context)
         client_manager_cd: Optional[ClientManager] = context.bot_data.get(
             "client_manager"
         )
         if client_manager_cd:
-            await client_manager_cd.disconnect(query.from_user.id)
+            await client_manager_cd.disconnect(query.from_user.id, _cd_chat_id, _cd_thread_id)
 
         is_git = (new_path / ".git").is_dir()
         git_badge = " (git)" if is_git else ""

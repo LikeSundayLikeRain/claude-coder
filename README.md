@@ -10,7 +10,8 @@ A Telegram bot that gives you remote access to [Claude Code](https://claude.ai/c
 This bot connects Telegram to Claude Code, providing a conversational AI interface for your codebase:
 
 - **Chat naturally** -- ask Claude to analyze, edit, or explain your code in plain language
-- **Maintain context** across conversations with automatic session persistence per project
+- **Maintain context** across conversations with automatic session persistence per project directory
+- **Work on multiple projects** simultaneously using Telegram group topics with concurrent Claude sessions
 - **Code on the go** from any device with Telegram
 - **Receive proactive notifications** from webhooks, scheduled jobs, and CI/CD events
 - **Stay secure** with built-in authentication, directory sandboxing, and audit logging
@@ -100,7 +101,7 @@ The bot supports two interaction modes:
 The default conversational mode. Just talk to Claude naturally -- no special commands required.
 
 **Commands:** `/start`, `/new`, `/interrupt`, `/status`, `/compact`, `/model`, `/repo`, `/resume`, `/commands`
-If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`
+In group chats with topics: `/add`, `/remove`, `/status` (dashboard)
 
 ```
 You: What files are in this project?
@@ -152,8 +153,7 @@ Use `/repo` to list cloned repos in your workspace, or `/repo <name>` to switch 
 
 Set `AGENTIC_MODE=false` to enable the full 13-command terminal-like interface with directory navigation, inline keyboards, quick actions, git integration, and session export.
 
-**Commands:** `/start`, `/help`, `/new`, `/continue`, `/end`, `/status`, `/cd`, `/ls`, `/pwd`, `/projects`, `/export`, `/actions`, `/git`  
-If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`
+**Commands:** `/start`, `/help`, `/new`, `/continue`, `/end`, `/status`, `/cd`, `/ls`, `/pwd`, `/projects`, `/export`, `/actions`, `/git`
 
 ```
 You: /cd my-web-app
@@ -184,6 +184,7 @@ Enable with `ENABLE_API_SERVER=true` and `ENABLE_SCHEDULER=true`. See [docs/setu
 - Classic terminal-like mode with 13 commands and inline keyboards
 - Full Claude Code SDK integration with actor-based client lifecycle
 - Automatic session persistence per user/project directory
+- Multi-project concurrent sessions via Telegram group forum topics
 - Multi-layer authentication (whitelist + optional token-based)
 - Directory sandboxing with path traversal prevention
 - File upload handling with archive extraction
@@ -250,30 +251,19 @@ ENABLE_SCHEDULER=false           # Enable cron job scheduler
 NOTIFICATION_CHAT_IDS=123,456    # Default chat IDs for proactive notifications
 ```
 
-### Project Threads Mode
+### Multi-Project Concurrent Sessions
 
-```bash
-# Enable strict topic routing by project
-ENABLE_PROJECT_THREADS=true
+Run multiple Claude sessions in parallel using Telegram group forum topics:
 
-# Mode: private (default) or group
-PROJECT_THREADS_MODE=private
+1. Create a Telegram group and enable **Topics** in group settings
+2. Add your bot to the group
+3. In the **General** topic, use `/add /path/to/project` to create project topics
+4. Send messages in each topic — they route to independent Claude sessions
 
-# YAML registry file (see config/projects.example.yaml)
-PROJECTS_CONFIG_PATH=config/projects.yaml
-
-# Required only when PROJECT_THREADS_MODE=group
-PROJECT_THREADS_CHAT_ID=-1001234567890
-
-# Minimum delay (seconds) between Telegram API calls during topic sync
-# Set 0 to disable pacing
-PROJECT_THREADS_SYNC_ACTION_INTERVAL_SECONDS=1.1
-```
-
-In strict mode, only `/start` and `/sync_threads` work outside mapped project topics.
-In private mode, `/start` auto-syncs project topics for your private bot chat.
-To use topics with your bot, enable them in BotFather:
-`Bot Settings -> Threaded mode`.
+**Group topic commands:**
+- `/add <path>` or `/add` (browse) — create a project topic in General
+- `/remove` — close the current project topic (run inside the topic)
+- `/status` — dashboard of all active sessions (in General)
 
 > **Full reference:** See [docs/configuration.md](docs/configuration.md) and [`.env.example`](.env.example).
 

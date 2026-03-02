@@ -14,223 +14,158 @@ import structlog
 from .database import DatabaseManager
 from .models import (
     AuditLogModel,
-    ProjectThreadModel,
-    UserModel,
+    ChatSessionModel,
 )
 
 logger = structlog.get_logger()
 
 
-class UserRepository:
-    """User data access."""
+class ChatSessionRepository:
+    """Unified session data access — one row per (chat_id, message_thread_id)."""
 
     def __init__(self, db_manager: DatabaseManager):
         self.db = db_manager
 
-    async def get_user(self, user_id: int) -> Optional[UserModel]:
-        """Get user by ID."""
-        async with self.db.get_connection() as conn:
-            cursor = await conn.execute(
-                "SELECT * FROM users WHERE user_id = ?", (user_id,)
-            )
-            row = await cursor.fetchone()
-            return UserModel.from_row(row) if row else None
-
-    async def ensure_user(self, user_id: int, telegram_username: Optional[str] = None) -> None:
-        """Create user row if it doesn't exist."""
-        async with self.db.get_connection() as conn:
-            await conn.execute(
-                "INSERT OR IGNORE INTO users (user_id, telegram_username) VALUES (?, ?)",
-                (user_id, telegram_username),
-            )
-            await conn.commit()
-
-    async def update_session(self, user_id: int, session_id: str, directory: str) -> None:
-        """Update session_id and directory for a user."""
-        async with self.db.get_connection() as conn:
-            await conn.execute(
-                """
-                INSERT INTO users (user_id, session_id, directory)
-                VALUES (?, ?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    session_id = excluded.session_id,
-                    directory = excluded.directory
-                """,
-                (user_id, session_id, directory),
-            )
-            await conn.commit()
-
-    async def update_directory(self, user_id: int, directory: str) -> None:
-        """Update directory and clear session_id (e.g. after /repo)."""
-        async with self.db.get_connection() as conn:
-            await conn.execute(
-                "UPDATE users SET directory = ?, session_id = NULL WHERE user_id = ?",
-                (directory, user_id),
-            )
-            await conn.commit()
-
-    async def clear_session(self, user_id: int) -> None:
-        """Clear session_id (e.g. after /new)."""
-        async with self.db.get_connection() as conn:
-            await conn.execute(
-                "UPDATE users SET session_id = NULL WHERE user_id = ?",
-                (user_id,),
-            )
-            await conn.commit()
-
-
-class ProjectThreadRepository:
-    """Project-thread mapping data access."""
-
-    def __init__(self, db_manager: DatabaseManager):
-        """Initialize repository."""
-        self.db = db_manager
-
-    async def get_by_chat_thread(
+    async def get(
         self, chat_id: int, message_thread_id: int
-    ) -> Optional[ProjectThreadModel]:
-        """Find active mapping by chat+thread."""
+    ) -> Optional[ChatSessionModel]:
+        """Get active session by PK."""
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
-                SELECT * FROM project_threads
+                SELECT * FROM chat_sessions
                 WHERE chat_id = ? AND message_thread_id = ? AND is_active = 1
-            """,
+                """,
                 (chat_id, message_thread_id),
             )
             row = await cursor.fetchone()
-            return ProjectThreadModel.from_row(row) if row else None
+            return ChatSessionModel.from_row(row) if row else None
 
-    async def get_by_chat_project(
-        self, chat_id: int, project_slug: str
-    ) -> Optional[ProjectThreadModel]:
-        """Find mapping by chat+project slug."""
-        async with self.db.get_connection() as conn:
-            cursor = await conn.execute(
-                """
-                SELECT * FROM project_threads
-                WHERE chat_id = ? AND project_slug = ?
-            """,
-                (chat_id, project_slug),
-            )
-            row = await cursor.fetchone()
-            return ProjectThreadModel.from_row(row) if row else None
-
-    async def upsert_mapping(
+    async def upsert(
         self,
-        project_slug: str,
         chat_id: int,
         message_thread_id: int,
-        topic_name: str,
-        is_active: bool = True,
-    ) -> ProjectThreadModel:
-        """Create or update mapping by unique chat+project key."""
+        user_id: int,
+        directory: str,
+        session_id: Optional[str] = None,
+        topic_name: Optional[str] = None,
+    ) -> None:
+        """Insert or update a session row. Uses ON CONFLICT to update."""
         async with self.db.get_connection() as conn:
             await conn.execute(
                 """
-                INSERT INTO project_threads (
-                    project_slug, chat_id, message_thread_id, topic_name, is_active
-                ) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(chat_id, project_slug) DO UPDATE SET
-                    message_thread_id = excluded.message_thread_id,
-                    topic_name = excluded.topic_name,
-                    is_active = excluded.is_active,
-                    updated_at = CURRENT_TIMESTAMP
-            """,
-                (project_slug, chat_id, message_thread_id, topic_name, is_active),
+                INSERT INTO chat_sessions
+                    (chat_id, message_thread_id, user_id, directory, session_id, topic_name, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(chat_id, message_thread_id) DO UPDATE SET
+                    session_id = COALESCE(excluded.session_id, chat_sessions.session_id),
+                    directory  = excluded.directory,
+                    topic_name = COALESCE(excluded.topic_name, chat_sessions.topic_name),
+                    is_active  = 1
+                """,
+                (chat_id, message_thread_id, user_id, directory, session_id, topic_name),
             )
             await conn.commit()
 
-        mapping = await self.get_by_chat_project(
-            chat_id=chat_id, project_slug=project_slug
-        )
-        if not mapping:
-            raise RuntimeError("Failed to upsert project thread mapping")
-        return mapping
-
-    async def deactivate_missing_projects(
-        self, chat_id: int, active_project_slugs: List[str]
-    ) -> int:
-        """Deactivate mappings for projects no longer enabled/present."""
-        async with self.db.get_connection() as conn:
-            if active_project_slugs:
-                placeholders = ",".join("?" for _ in active_project_slugs)
-                query = f"""
-                    UPDATE project_threads
-                    SET is_active = 0, updated_at = CURRENT_TIMESTAMP
-                    WHERE chat_id = ?
-                      AND project_slug NOT IN ({placeholders})
-                      AND is_active = 1
-                """
-                params = [chat_id] + active_project_slugs
-                cursor = await conn.execute(query, params)
-            else:
-                cursor = await conn.execute(
-                    """
-                    UPDATE project_threads
-                    SET is_active = 0, updated_at = CURRENT_TIMESTAMP
-                    WHERE chat_id = ? AND is_active = 1
-                """,
-                    (chat_id,),
-                )
-            await conn.commit()
-            return cursor.rowcount
-
-    async def list_stale_active_mappings(
-        self, chat_id: int, active_project_slugs: List[str]
-    ) -> List[ProjectThreadModel]:
-        """List active mappings that are no longer enabled/present."""
-        async with self.db.get_connection() as conn:
-            if active_project_slugs:
-                placeholders = ",".join("?" for _ in active_project_slugs)
-                query = f"""
-                    SELECT * FROM project_threads
-                    WHERE chat_id = ?
-                      AND is_active = 1
-                      AND project_slug NOT IN ({placeholders})
-                    ORDER BY project_slug ASC
-                """
-                params = [chat_id] + active_project_slugs
-                cursor = await conn.execute(query, params)
-            else:
-                cursor = await conn.execute(
-                    """
-                    SELECT * FROM project_threads
-                    WHERE chat_id = ? AND is_active = 1
-                    ORDER BY project_slug ASC
-                """,
-                    (chat_id,),
-                )
-            rows = await cursor.fetchall()
-            return [ProjectThreadModel.from_row(row) for row in rows]
-
-    async def set_active(self, chat_id: int, project_slug: str, is_active: bool) -> int:
-        """Set active flag for a mapping by chat+project."""
+    async def deactivate(self, chat_id: int, message_thread_id: int) -> int:
+        """Soft-delete (is_active=0). Returns rowcount."""
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
-                UPDATE project_threads
-                SET is_active = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE chat_id = ? AND project_slug = ?
-            """,
-                (is_active, chat_id, project_slug),
+                UPDATE chat_sessions
+                SET is_active = 0
+                WHERE chat_id = ? AND message_thread_id = ?
+                """,
+                (chat_id, message_thread_id),
             )
             await conn.commit()
             return cursor.rowcount
 
-    async def list_by_chat(
-        self, chat_id: int, active_only: bool = True
-    ) -> List[ProjectThreadModel]:
-        """List mappings for a chat."""
+    async def delete(self, chat_id: int, message_thread_id: int) -> None:
+        """Hard-delete a row (used by /new)."""
         async with self.db.get_connection() as conn:
-            query = "SELECT * FROM project_threads WHERE chat_id = ?"
-            params = [chat_id]
-            if active_only:
-                query += " AND is_active = 1"
-            query += " ORDER BY project_slug ASC"
-            cursor = await conn.execute(query, params)
+            await conn.execute(
+                """
+                DELETE FROM chat_sessions
+                WHERE chat_id = ? AND message_thread_id = ?
+                """,
+                (chat_id, message_thread_id),
+            )
+            await conn.commit()
+
+    async def find_by_session_id(
+        self, chat_id: int, session_id: str
+    ) -> Optional[ChatSessionModel]:
+        """Find an active topic bound to a given Claude session_id."""
+        async with self.db.get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT * FROM chat_sessions
+                WHERE chat_id = ? AND session_id = ? AND is_active = 1
+                LIMIT 1
+                """,
+                (chat_id, session_id),
+            )
+            row = await cursor.fetchone()
+            return ChatSessionModel.from_row(row) if row else None
+
+    async def list_active_by_chat(self, chat_id: int) -> List[ChatSessionModel]:
+        """All active sessions in a chat (for /status dashboard). ORDER BY directory ASC."""
+        async with self.db.get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT * FROM chat_sessions
+                WHERE chat_id = ? AND is_active = 1
+                ORDER BY directory ASC
+                """,
+                (chat_id,),
+            )
             rows = await cursor.fetchall()
-            return [ProjectThreadModel.from_row(row) for row in rows]
+            return [ChatSessionModel.from_row(row) for row in rows]
+
+    async def list_by_user(self, user_id: int) -> List[ChatSessionModel]:
+        """All active sessions for a user across all chats (reverse lookup). ORDER BY created_at DESC."""
+        async with self.db.get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT * FROM chat_sessions
+                WHERE user_id = ? AND is_active = 1
+                ORDER BY created_at DESC
+                """,
+                (user_id,),
+            )
+            rows = await cursor.fetchall()
+            return [ChatSessionModel.from_row(row) for row in rows]
+
+    async def get_by_user_directory(
+        self, user_id: int, directory: str
+    ) -> Optional[ChatSessionModel]:
+        """Private DM lookup: WHERE user_id=? AND directory=? AND message_thread_id=0 AND is_active=1."""
+        async with self.db.get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT * FROM chat_sessions
+                WHERE user_id = ? AND directory = ? AND message_thread_id = 0 AND is_active = 1
+                """,
+                (user_id, directory),
+            )
+            row = await cursor.fetchone()
+            return ChatSessionModel.from_row(row) if row else None
+
+    async def count_active_by_chat_directory(
+        self, chat_id: int, directory: str
+    ) -> int:
+        """Count active sessions for a directory in a chat (for auto-suffix naming)."""
+        async with self.db.get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT COUNT(*) FROM chat_sessions
+                WHERE chat_id = ? AND directory = ? AND is_active = 1
+                """,
+                (chat_id, directory),
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else 0
 
 
 class AuditLogRepository:
@@ -252,7 +187,7 @@ class AuditLogRepository:
                 INSERT INTO audit_log
                 (user_id, event_type, event_data, success, timestamp, ip_address)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """,
+                """,
                 (
                     audit_log.user_id,
                     audit_log.event_type,
@@ -276,7 +211,7 @@ class AuditLogRepository:
                 WHERE user_id = ?
                 ORDER BY timestamp DESC
                 LIMIT ?
-            """,
+                """,
                 (user_id, limit),
             )
             rows = await cursor.fetchall()
@@ -290,10 +225,8 @@ class AuditLogRepository:
                 SELECT * FROM audit_log
                 WHERE timestamp > datetime('now', '-' || ? || ' hours')
                 ORDER BY timestamp DESC
-            """,
+                """,
                 (hours,),
             )
             rows = await cursor.fetchall()
             return [AuditLogModel.from_row(row) for row in rows]
-
-

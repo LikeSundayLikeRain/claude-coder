@@ -11,7 +11,7 @@ import asyncio
 from typing import Any, Callable, Dict, Optional
 
 import structlog
-from telegram import Update
+from telegram import BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, Update
 from telegram.ext import (
     AIORateLimiter,
     Application,
@@ -87,8 +87,21 @@ class ClaudeCodeBot:
     async def _set_bot_commands(self) -> None:
         """Set bot command menu via orchestrator."""
         commands = await self.orchestrator.get_bot_commands()
-        await self.app.bot.set_my_commands(commands)
-        logger.info("Bot commands set", commands=[cmd.command for cmd in commands])
+        if isinstance(commands, dict):
+            await self.app.bot.set_my_commands(
+                commands["private"], scope=BotCommandScopeAllPrivateChats()
+            )
+            await self.app.bot.set_my_commands(
+                commands["group"], scope=BotCommandScopeAllGroupChats()
+            )
+            logger.info(
+                "Bot commands set",
+                private=[cmd.command for cmd in commands["private"]],
+                group=[cmd.command for cmd in commands["group"]],
+            )
+        else:
+            await self.app.bot.set_my_commands(commands)
+            logger.info("Bot commands set", commands=[cmd.command for cmd in commands])
 
     def _register_handlers(self) -> None:
         """Register handlers via orchestrator (mode-aware)."""

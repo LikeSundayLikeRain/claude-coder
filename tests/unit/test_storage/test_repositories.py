@@ -6,14 +6,10 @@ from pathlib import Path
 import pytest
 
 from src.storage.database import DatabaseManager
-from src.storage.models import (
-    ProjectThreadModel,
-    UserModel,
-)
+from src.storage.models import ChatSessionModel
 from src.storage.repositories import (
     AuditLogRepository,
-    ProjectThreadRepository,
-    UserRepository,
+    ChatSessionRepository,
 )
 
 
@@ -29,9 +25,9 @@ async def db_manager():
 
 
 @pytest.fixture
-async def user_repo(db_manager):
-    """Create user repository."""
-    return UserRepository(db_manager)
+async def chat_session_repo(db_manager):
+    """Create chat session repository."""
+    return ChatSessionRepository(db_manager)
 
 
 @pytest.fixture
@@ -40,144 +36,100 @@ async def audit_repo(db_manager):
     return AuditLogRepository(db_manager)
 
 
-@pytest.fixture
-async def project_thread_repo(db_manager):
-    """Create project thread repository."""
-    return ProjectThreadRepository(db_manager)
+class TestChatSessionRepository:
+    """Test chat session repository."""
 
-
-class TestUserRepository:
-    """Test user repository."""
-
-    async def test_create_and_get_user(self, user_repo):
-        """Test creating and retrieving user via ensure_user + get_user."""
-        await user_repo.ensure_user(12345, "testuser")
-
-        retrieved_user = await user_repo.get_user(12345)
-        assert retrieved_user is not None
-        assert retrieved_user.user_id == 12345
-        assert retrieved_user.telegram_username == "testuser"
-
-    async def test_update_user(self, user_repo):
-        """Test updating session and directory for a user."""
-        await user_repo.ensure_user(12346, "testuser2")
-
-        await user_repo.update_session(12346, "sess-xyz", "/home/user/project")
-
-        updated_user = await user_repo.get_user(12346)
-        assert updated_user.session_id == "sess-xyz"
-        assert updated_user.directory == "/home/user/project"
-
-    async def test_get_allowed_users(self, user_repo):
-        """Test that ensure_user creates rows that can be retrieved."""
-        await user_repo.ensure_user(12347, "allowed")
-        await user_repo.ensure_user(12348, "disallowed")
-
-        user1 = await user_repo.get_user(12347)
-        user2 = await user_repo.get_user(12348)
-
-        assert user1 is not None
-        assert user1.user_id == 12347
-        assert user2 is not None
-        assert user2.user_id == 12348
-
-
-class TestProjectThreadRepository:
-    """Test project thread repository."""
-
-    async def test_upsert_and_lookup(self, project_thread_repo):
-        """Upsert creates mapping and lookup resolves it."""
-        mapping = await project_thread_repo.upsert_mapping(
-            project_slug="app1",
-            chat_id=-1001234567890,
-            message_thread_id=321,
-            topic_name="App One",
+    async def test_upsert_and_get(self, chat_session_repo):
+        """upsert creates a row and get retrieves it."""
+        await chat_session_repo.upsert(
+            chat_id=100,
+            message_thread_id=0,
+            user_id=42,
+            directory="/home/user/proj",
+            session_id="sess-abc",
         )
 
-        assert isinstance(mapping, ProjectThreadModel)
-        assert mapping.project_slug == "app1"
-        assert mapping.message_thread_id == 321
+        result = await chat_session_repo.get(100, 0)
+        assert result is not None
+        assert isinstance(result, ChatSessionModel)
+        assert result.chat_id == 100
+        assert result.message_thread_id == 0
+        assert result.user_id == 42
+        assert result.directory == "/home/user/proj"
+        assert result.session_id == "sess-abc"
 
-        lookup = await project_thread_repo.get_by_chat_thread(-1001234567890, 321)
-        assert lookup is not None
-        assert lookup.project_slug == "app1"
+    async def test_upsert_overwrites_session_id(self, chat_session_repo):
+        """Upserting with new session_id updates the existing row."""
+        await chat_session_repo.upsert(100, 0, 42, "/proj", "sess-old")
+        await chat_session_repo.upsert(100, 0, 42, "/proj", "sess-new")
 
-    async def test_deactivate_missing_projects(self, project_thread_repo):
-        """Mappings not in active set are deactivated."""
-        await project_thread_repo.upsert_mapping(
-            project_slug="app1",
-            chat_id=-1001234567890,
-            message_thread_id=111,
-            topic_name="App 1",
-        )
-        await project_thread_repo.upsert_mapping(
-            project_slug="app2",
-            chat_id=-1001234567890,
-            message_thread_id=222,
-            topic_name="App 2",
-        )
+        result = await chat_session_repo.get(100, 0)
+        assert result is not None
+        assert result.session_id == "sess-new"
 
-        changed = await project_thread_repo.deactivate_missing_projects(
-            chat_id=-1001234567890,
-            active_project_slugs=["app1"],
-        )
+    async def test_get_returns_none_for_missing(self, chat_session_repo):
+        """get returns None when no row exists."""
+        result = await chat_session_repo.get(99999, 0)
+        assert result is None
 
+    async def test_deactivate(self, chat_session_repo):
+        """deactivate sets is_active=0; subsequent get returns None."""
+        await chat_session_repo.upsert(200, 10, 5, "/proj/alpha", topic_name="Alpha")
+
+        changed = await chat_session_repo.deactivate(200, 10)
         assert changed == 1
-        inactive_mapping = await project_thread_repo.get_by_chat_project(
-            -1001234567890, "app2"
-        )
-        assert inactive_mapping is not None
-        assert inactive_mapping.is_active is False
 
-    async def test_list_stale_active_mappings(self, project_thread_repo):
-        """Returns only active mappings not in enabled project set."""
-        await project_thread_repo.upsert_mapping(
-            project_slug="app1",
-            chat_id=-1001234567890,
-            message_thread_id=111,
-            topic_name="App 1",
-            is_active=True,
-        )
-        await project_thread_repo.upsert_mapping(
-            project_slug="app2",
-            chat_id=-1001234567890,
-            message_thread_id=222,
-            topic_name="App 2",
-            is_active=True,
-        )
-        await project_thread_repo.upsert_mapping(
-            project_slug="app3",
-            chat_id=-1001234567890,
-            message_thread_id=333,
-            topic_name="App 3",
-            is_active=False,
-        )
+        # get only returns active rows
+        result = await chat_session_repo.get(200, 10)
+        assert result is None
 
-        stale = await project_thread_repo.list_stale_active_mappings(
-            chat_id=-1001234567890,
-            active_project_slugs=["app1"],
+    async def test_delete(self, chat_session_repo):
+        """delete hard-removes the row."""
+        await chat_session_repo.upsert(300, 0, 7, "/proj/beta")
+        assert await chat_session_repo.get(300, 0) is not None
+
+        await chat_session_repo.delete(300, 0)
+        assert await chat_session_repo.get(300, 0) is None
+
+    async def test_list_active_by_chat(self, chat_session_repo):
+        """list_active_by_chat returns only active rows for a chat."""
+        await chat_session_repo.upsert(-1001, 10, 1, "/proj/a", topic_name="A")
+        await chat_session_repo.upsert(-1001, 20, 2, "/proj/b", topic_name="B")
+        await chat_session_repo.deactivate(-1001, 20)
+
+        active = await chat_session_repo.list_active_by_chat(-1001)
+        assert len(active) == 1
+        assert active[0].directory == "/proj/a"
+
+    async def test_get_by_user_directory(self, chat_session_repo):
+        """get_by_user_directory finds DM session (message_thread_id=0)."""
+        await chat_session_repo.upsert(
+            chat_id=42, message_thread_id=0, user_id=42, directory="/home/user/proj"
         )
 
-        assert len(stale) == 1
-        assert stale[0].project_slug == "app2"
+        result = await chat_session_repo.get_by_user_directory(42, "/home/user/proj")
+        assert result is not None
+        assert result.directory == "/home/user/proj"
 
-    async def test_set_active_updates_flag(self, project_thread_repo):
-        """set_active toggles mapping active flag."""
-        await project_thread_repo.upsert_mapping(
-            project_slug="app1",
-            chat_id=-1001234567890,
-            message_thread_id=111,
-            topic_name="App 1",
-            is_active=True,
-        )
+    async def test_count_active_by_chat_directory(self, chat_session_repo):
+        """count_active_by_chat_directory counts active sessions per directory."""
+        await chat_session_repo.upsert(-1001, 10, 1, "/proj/a", topic_name="A1")
+        await chat_session_repo.upsert(-1001, 20, 2, "/proj/a", topic_name="A2")
+        await chat_session_repo.upsert(-1001, 30, 3, "/proj/b", topic_name="B")
 
-        changed = await project_thread_repo.set_active(
-            chat_id=-1001234567890,
-            project_slug="app1",
-            is_active=False,
-        )
+        count_a = await chat_session_repo.count_active_by_chat_directory(-1001, "/proj/a")
+        assert count_a == 2
 
-        assert changed == 1
-        mapping = await project_thread_repo.get_by_chat_project(-1001234567890, "app1")
-        assert mapping is not None
-        assert mapping.is_active is False
+        count_b = await chat_session_repo.count_active_by_chat_directory(-1001, "/proj/b")
+        assert count_b == 1
+
+    async def test_list_by_user(self, chat_session_repo):
+        """list_by_user returns all active sessions for a user."""
+        await chat_session_repo.upsert(100, 0, 99, "/proj/x")
+        await chat_session_repo.upsert(200, 0, 99, "/proj/y")
+        await chat_session_repo.upsert(300, 0, 88, "/proj/z")  # different user
+
+        sessions = await chat_session_repo.list_by_user(99)
+        assert len(sessions) == 2
+        dirs = {s.directory for s in sessions}
+        assert dirs == {"/proj/x", "/proj/y"}

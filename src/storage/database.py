@@ -29,7 +29,7 @@ sqlite3.register_converter("DATETIME", lambda b: datetime.fromisoformat(b.decode
 # Keep DATE columns as raw ISO strings (matches existing model expectations).
 sqlite3.register_converter("DATE", lambda b: b.decode())
 
-# Initial schema migration
+# Initial schema migration (legacy schema — migrations run on top of this)
 INITIAL_SCHEMA = """
 -- Core Tables
 
@@ -386,6 +386,135 @@ class DatabaseManager:
                 DROP TABLE users;
                 ALTER TABLE users_new RENAME TO users;
                 DROP TABLE IF EXISTS bot_sessions;
+
+                PRAGMA foreign_keys = ON;
+                """,
+            ),
+            (
+                11,
+                """
+                PRAGMA foreign_keys = OFF;
+
+                CREATE TABLE IF NOT EXISTS user_sessions (
+                    user_id    INTEGER NOT NULL,
+                    directory  TEXT NOT NULL,
+                    session_id TEXT,
+                    PRIMARY KEY (user_id, directory)
+                );
+
+                INSERT OR IGNORE INTO user_sessions (user_id, directory, session_id)
+                SELECT user_id, directory, session_id
+                FROM users
+                WHERE directory IS NOT NULL;
+
+                DROP TABLE IF EXISTS users_new;
+                CREATE TABLE users_new (
+                    user_id           INTEGER PRIMARY KEY,
+                    telegram_username TEXT
+                );
+                INSERT INTO users_new (user_id, telegram_username)
+                SELECT user_id, telegram_username FROM users;
+                DROP TABLE users;
+                ALTER TABLE users_new RENAME TO users;
+
+                DROP TABLE IF EXISTS project_threads_new;
+                CREATE TABLE project_threads_new (
+                    chat_id            INTEGER NOT NULL,
+                    message_thread_id  INTEGER NOT NULL,
+                    directory          TEXT NOT NULL,
+                    topic_name         TEXT NOT NULL,
+                    is_active          BOOLEAN DEFAULT TRUE,
+                    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (chat_id, message_thread_id)
+                );
+                DROP TABLE IF EXISTS project_threads;
+                ALTER TABLE project_threads_new RENAME TO project_threads;
+
+                CREATE INDEX IF NOT EXISTS idx_project_threads_directory
+                    ON project_threads(directory);
+
+                PRAGMA foreign_keys = ON;
+                """,
+            ),
+            (
+                12,
+                """
+                PRAGMA foreign_keys = OFF;
+
+                -- 1. Create chat_sessions: unified per-chat-thread session table
+                CREATE TABLE IF NOT EXISTS chat_sessions (
+                    chat_id           INTEGER NOT NULL,
+                    message_thread_id INTEGER NOT NULL DEFAULT 0,
+                    user_id           INTEGER NOT NULL,
+                    directory         TEXT NOT NULL,
+                    session_id        TEXT,
+                    topic_name        TEXT,
+                    is_active         BOOLEAN DEFAULT TRUE,
+                    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (chat_id, message_thread_id)
+                );
+
+                -- 2. Migrate project_threads rows (group-chat topics) into chat_sessions,
+                --    joining user_sessions to pull session_id for matching directories.
+                INSERT OR IGNORE INTO chat_sessions
+                    (chat_id, message_thread_id, user_id, directory, session_id, topic_name, is_active, created_at)
+                SELECT
+                    pt.chat_id,
+                    pt.message_thread_id,
+                    COALESCE(us.user_id, 0)  AS user_id,
+                    pt.directory,
+                    us.session_id,
+                    pt.topic_name,
+                    pt.is_active,
+                    pt.created_at
+                FROM project_threads pt
+                LEFT JOIN user_sessions us ON us.directory = pt.directory;
+
+                -- 3. Migrate private DM sessions (user_sessions rows NOT already
+                --    matched to a project_thread directory) as chat_id=user_id, thread=0.
+                INSERT OR IGNORE INTO chat_sessions
+                    (chat_id, message_thread_id, user_id, directory, session_id, topic_name, is_active)
+                SELECT
+                    us.user_id  AS chat_id,
+                    0           AS message_thread_id,
+                    us.user_id,
+                    us.directory,
+                    us.session_id,
+                    NULL        AS topic_name,
+                    1           AS is_active
+                FROM user_sessions us
+                WHERE us.directory NOT IN (SELECT directory FROM project_threads);
+
+                -- 4. Rebuild audit_log WITHOUT the FK constraint to users.
+                CREATE TABLE IF NOT EXISTS audit_log_new (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id    INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    event_data JSON,
+                    success    BOOLEAN DEFAULT TRUE,
+                    timestamp  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    ip_address TEXT
+                );
+                INSERT INTO audit_log_new
+                    (id, user_id, event_type, event_data, success, timestamp, ip_address)
+                SELECT
+                    id, user_id, event_type, event_data, success, timestamp, ip_address
+                FROM audit_log;
+                DROP TABLE audit_log;
+                ALTER TABLE audit_log_new RENAME TO audit_log;
+
+                -- Restore audit_log indexes
+                CREATE INDEX IF NOT EXISTS idx_audit_log_user_id  ON audit_log(user_id);
+                CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
+
+                -- 5. Drop old tables
+                DROP TABLE IF EXISTS users;
+                DROP TABLE IF EXISTS user_sessions;
+                DROP TABLE IF EXISTS project_threads;
+
+                -- 6. Indexes on chat_sessions
+                CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id  ON chat_sessions(user_id);
+                CREATE INDEX IF NOT EXISTS idx_chat_sessions_directory ON chat_sessions(directory);
 
                 PRAGMA foreign_keys = ON;
                 """,

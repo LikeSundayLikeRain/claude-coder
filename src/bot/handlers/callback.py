@@ -28,9 +28,7 @@ def _is_within_root(path: Path, root: Path) -> bool:
 def _get_thread_project_root(
     settings: Settings, context: ContextTypes.DEFAULT_TYPE
 ) -> Optional[Path]:
-    """Get thread project root when strict thread mode is active."""
-    if not settings.enable_project_threads:
-        return None
+    """Get thread project root from topic context (auto-detected for supergroups)."""
     thread_context = context.user_data.get("_thread_context")
     if not thread_context:
         return None
@@ -325,8 +323,8 @@ async def _handle_show_projects_action(
     settings: Settings = context.bot_data["settings"]
 
     try:
-        if settings.enable_project_threads:
-            registry = context.bot_data.get("project_registry")
+        registry = context.bot_data.get("project_registry")
+        if registry is not None:
             if not registry:
                 await query.edit_message_text(
                     "❌ <b>Project registry is not initialized.</b>",

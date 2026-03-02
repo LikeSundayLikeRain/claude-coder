@@ -133,42 +133,22 @@ ENABLE_SCHEDULER=false                # Enable cron job scheduler
 NOTIFICATION_CHAT_IDS=123456,789012  # Default Telegram chat IDs for proactive notifications
 ```
 
-#### Project Thread Mode
+#### Multi-Project Concurrent Sessions
 
-```bash
-# Strict project routing via Telegram project topics
-ENABLE_PROJECT_THREADS=false
+No configuration needed. The bot automatically detects supergroups with Topics enabled.
 
-# Mode: private (default) or group
-PROJECT_THREADS_MODE=private
+**How it works:**
+- Each forum topic IS a session, keyed by `(chat_id, message_thread_id)`
+- Private DMs use `(user_id, 0)` as the session key
+- Use `/add /path/to/project` in the General topic to bind a project directory
+- Use `/add` (no path) to browse directories interactively
+- Messages in each topic route to independent Claude sessions automatically
+- Use `/remove` inside a project topic to close it
+- Use `/status` in the General topic for a dashboard of all active sessions
 
-# YAML registry file with project slugs/names/paths
-PROJECTS_CONFIG_PATH=config/projects.yaml
-
-# Required only for PROJECT_THREADS_MODE=group
-PROJECT_THREADS_CHAT_ID=-1001234567890
-
-# Minimum delay (seconds) between Telegram API calls during topic sync
-# Set 0 to disable pacing
-PROJECT_THREADS_SYNC_ACTION_INTERVAL_SECONDS=1.1
-```
-
-`PROJECTS_CONFIG_PATH` schema:
-
-```yaml
-projects:
-  - slug: my-app
-    name: My App
-    path: my-app
-    enabled: true
-```
-
-When `ENABLE_PROJECT_THREADS=true`:
-- `PROJECT_THREADS_MODE=private`:
-  - `/start` and `/sync_threads` are allowed outside topics in private chat.
-  - all other updates must be inside mapped project topics.
-- `PROJECT_THREADS_MODE=group`:
-  - behavior remains forum-topic based using `PROJECT_THREADS_CHAT_ID`.
+**Data model:**
+- `chat_sessions` table is the single source of truth — stores session IDs and project directories, PK `(chat_id, message_thread_id)`
+- `ClientManager` manages concurrent `UserClient` actors keyed by `(user_id, chat_id, message_thread_id)`
 
 #### Monitoring & Logging
 

@@ -47,9 +47,8 @@ class TestDatabaseManager:
 
             # Tables that should exist after all migrations
             expected_tables = [
-                "users",
+                "chat_sessions",
                 "audit_log",
-                "project_threads",
                 "schema_version",
                 "scheduled_jobs",
                 "webhook_events",
@@ -58,13 +57,16 @@ class TestDatabaseManager:
             for table in expected_tables:
                 assert table in tables, f"Expected table '{table}' not found"
 
-            # Tables that should have been dropped by migrations 7/8
+            # Tables that should have been dropped by migrations 7/8 or migration 12
             dropped_tables = [
                 "messages",
                 "tool_usage",
                 "cost_tracking",
                 "user_tokens",
                 "sessions",
+                "users",
+                "user_sessions",
+                "project_threads",
             ]
 
             for table in dropped_tables:
@@ -86,23 +88,27 @@ class TestDatabaseManager:
             )
             indexes = [row[0] for row in await cursor.fetchall()]
 
-            # Indexes that should still exist
+            # Indexes that should still exist after all migrations
             expected_indexes = [
                 "idx_audit_log_user_id",
                 "idx_audit_log_timestamp",
-                "idx_project_threads_chat_active",
-                "idx_project_threads_slug",
+                "idx_chat_sessions_user_id",
+                "idx_chat_sessions_directory",
             ]
 
             for index in expected_indexes:
                 assert index in indexes, f"Expected index '{index}' not found"
+
+            # Old project_threads indexes should be gone after migration 12
+            assert "idx_project_threads_slug" not in indexes
+            assert "idx_project_threads_directory" not in indexes
 
     async def test_migration_tracking(self, db_manager):
         """Test that migrations are tracked."""
         async with db_manager.get_connection() as conn:
             cursor = await conn.execute("SELECT MAX(version) FROM schema_version")
             version = await cursor.fetchone()
-            assert version[0] == 10  # Should be at migration 10
+            assert version[0] == 12  # Should be at migration 12
 
     async def test_views_dropped(self, db_manager):
         """Test that analytics views were dropped by migration 7."""

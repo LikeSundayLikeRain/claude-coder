@@ -9,7 +9,6 @@ from telegram.ext import ContextTypes
 
 from ...claude.facade import ClaudeIntegration
 from ...config.settings import Settings
-from ...projects import PrivateTopicsUnavailableError, load_project_registry
 from ...security.audit import AuditLogger
 from ...security.validators import SecurityValidator
 from ..utils.html_format import escape_html
@@ -29,9 +28,7 @@ def _is_within_root(path: Path, root: Path) -> bool:
 def _get_thread_project_root(
     settings: Settings, context: ContextTypes.DEFAULT_TYPE
 ) -> Optional[Path]:
-    """Get thread project root when strict thread mode is active."""
-    if not settings.enable_project_threads:
-        return None
+    """Get thread project root from topic context (auto-detected for supergroups)."""
     thread_context = context.user_data.get("_thread_context")
     if not thread_context:
         return None
@@ -49,63 +46,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.effective_user
     settings: Settings = context.bot_data["settings"]
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
-    manager = context.bot_data.get("project_threads_manager")
     sync_section = ""
-
-    if settings.enable_project_threads and settings.project_threads_mode == "private":
-        if not _is_private_chat(update):
-            await update.message.reply_text(
-                "🚫 <b>Private Topics Mode</b>\n\n"
-                "Use this bot in a private chat and run <code>/start</code> there.",
-                parse_mode="HTML",
-            )
-            return
-
-    if (
-        settings.enable_project_threads
-        and settings.project_threads_mode == "private"
-        and _is_private_chat(update)
-    ):
-        if manager is None:
-            await update.message.reply_text(
-                "❌ <b>Project thread mode is misconfigured</b>\n\n"
-                "Thread manager is not initialized.",
-                parse_mode="HTML",
-            )
-            return
-
-        try:
-            sync_result = await manager.sync_topics(
-                context.bot,
-                chat_id=update.effective_chat.id,
-            )
-            sync_section = (
-                "\n\n🧵 <b>Project Topics Synced</b>\n"
-                f"• Created: <b>{sync_result.created}</b>\n"
-                f"• Reused: <b>{sync_result.reused}</b>\n"
-                f"• Renamed: <b>{sync_result.renamed}</b>\n"
-                f"• Failed: <b>{sync_result.failed}</b>\n\n"
-                "Use a project topic thread to start coding."
-            )
-        except PrivateTopicsUnavailableError:
-            await update.message.reply_text(
-                manager.private_topics_unavailable_message(),
-                parse_mode="HTML",
-            )
-            if audit_logger:
-                await audit_logger.log_command(
-                    user_id=user.id,
-                    command="start",
-                    args=[],
-                    success=False,
-                )
-            return
-        except Exception as e:
-            sync_section = (
-                "\n\n⚠️ <b>Topic Sync Warning</b>\n"
-                f"{escape_html(str(e))}\n\n"
-                "Run <code>/sync_threads</code> to retry."
-            )
 
     welcome_message = (
         f"👋 Welcome to Claude Code Telegram Bot, {escape_html(user.first_name)}!\n\n"
@@ -202,103 +143,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def sync_threads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Synchronize project topics in the configured forum chat."""
-    settings: Settings = context.bot_data["settings"]
+    """Deprecated — redirects to /add."""
     audit_logger: AuditLogger = context.bot_data.get("audit_logger")
     user_id = update.effective_user.id
 
-    if not settings.enable_project_threads:
-        await update.message.reply_text(
-            "ℹ️ <b>Project thread mode is disabled.</b>", parse_mode="HTML"
-        )
-        return
-
-    manager = context.bot_data.get("project_threads_manager")
-    if not manager:
-        await update.message.reply_text(
-            "❌ <b>Project thread manager not initialized.</b>", parse_mode="HTML"
-        )
-        return
-
-    status_msg = await update.message.reply_text(
-        "🔄 <b>Syncing project topics...</b>", parse_mode="HTML"
+    await update.message.reply_text(
+        "ℹ️ <b>sync_threads is no longer supported.</b>\n\n"
+        "Use <code>/add</code> in the General topic to create project topics.",
+        parse_mode="HTML",
     )
-
-    if settings.project_threads_mode == "private":
-        if not _is_private_chat(update):
-            await status_msg.edit_text(
-                "❌ <b>Private Thread Mode</b>\n\n"
-                "Run <code>/sync_threads</code> in your private chat with the bot.",
-                parse_mode="HTML",
-            )
-            return
-        target_chat_id = update.effective_chat.id
-    else:
-        if settings.project_threads_chat_id is None:
-            await status_msg.edit_text(
-                "❌ <b>Group Thread Mode Misconfigured</b>\n\n"
-                "Set <code>PROJECT_THREADS_CHAT_ID</code> first.",
-                parse_mode="HTML",
-            )
-            return
-        if (
-            not update.effective_chat
-            or update.effective_chat.id != settings.project_threads_chat_id
-        ):
-            await status_msg.edit_text(
-                "❌ <b>Group Thread Mode</b>\n\n"
-                "Run <code>/sync_threads</code> in the configured project threads group.",
-                parse_mode="HTML",
-            )
-            return
-        target_chat_id = settings.project_threads_chat_id
-
-    try:
-        if not settings.projects_config_path:
-            await status_msg.edit_text(
-                "❌ <b>Project thread mode is misconfigured</b>\n\n"
-                "Set <code>PROJECTS_CONFIG_PATH</code> to a valid YAML file.",
-                parse_mode="HTML",
-            )
-            if audit_logger:
-                await audit_logger.log_command(user_id, "sync_threads", [], False)
-            return
-
-        registry = load_project_registry(
-            config_path=settings.projects_config_path,
-            approved_directory=settings.approved_directory,
-        )
-        manager.registry = registry
-        context.bot_data["project_registry"] = registry
-
-        result = await manager.sync_topics(context.bot, chat_id=target_chat_id)
-        await status_msg.edit_text(
-            "✅ <b>Project topic sync complete</b>\n\n"
-            f"• Created: <b>{result.created}</b>\n"
-            f"• Reused: <b>{result.reused}</b>\n"
-            f"• Renamed: <b>{result.renamed}</b>\n"
-            f"• Reopened: <b>{result.reopened}</b>\n"
-            f"• Closed: <b>{result.closed}</b>\n"
-            f"• Deactivated: <b>{result.deactivated}</b>\n"
-            f"• Failed: <b>{result.failed}</b>",
-            parse_mode="HTML",
-        )
-        if audit_logger:
-            await audit_logger.log_command(user_id, "sync_threads", [], True)
-    except PrivateTopicsUnavailableError:
-        await status_msg.edit_text(
-            manager.private_topics_unavailable_message(),
-            parse_mode="HTML",
-        )
-        if audit_logger:
-            await audit_logger.log_command(user_id, "sync_threads", [], False)
-    except Exception as e:
-        await status_msg.edit_text(
-            f"❌ <b>Project topic sync failed</b>\n\n{escape_html(str(e))}",
-            parse_mode="HTML",
-        )
-        if audit_logger:
-            await audit_logger.log_command(user_id, "sync_threads", [], False)
+    if audit_logger:
+        await audit_logger.log_command(user_id, "sync_threads", [], False)
 
 
 async def new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -763,42 +618,6 @@ async def show_projects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     settings: Settings = context.bot_data["settings"]
 
     try:
-        if settings.enable_project_threads:
-            registry = context.bot_data.get("project_registry")
-            manager = context.bot_data.get("project_threads_manager")
-            if manager and getattr(manager, "registry", None):
-                registry = manager.registry
-            if not registry:
-                await update.message.reply_text(
-                    "❌ <b>Project registry is not initialized.</b>",
-                    parse_mode="HTML",
-                )
-                return
-
-            projects = registry.list_enabled()
-            if not projects:
-                await update.message.reply_text(
-                    "📁 <b>No Projects Found</b>\n\n"
-                    "No enabled projects found in projects config.",
-                    parse_mode="HTML",
-                )
-                return
-
-            project_list = "\n".join(
-                [
-                    f"• <b>{escape_html(p.name)}</b> "
-                    f"(<code>{escape_html(p.slug)}</code>) "
-                    f"→ <code>{escape_html(str(p.relative_path))}</code>"
-                    for p in projects
-                ]
-            )
-
-            await update.message.reply_text(
-                f"📁 <b>Configured Projects</b>\n\n{project_list}",
-                parse_mode="HTML",
-            )
-            return
-
         # Get directories in approved directory (these are "projects")
         projects = []
         for item in sorted(settings.approved_directory.iterdir()):
