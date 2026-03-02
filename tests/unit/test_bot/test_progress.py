@@ -97,13 +97,23 @@ class TestProgressMessageManagerRender:
         text = pm.render()
         assert text.startswith("Working...")
 
-    def test_text_entry_skipped_in_render(self) -> None:
-        """Text entries are not rendered — response is sent separately."""
+    def test_text_entry_shown_in_render(self) -> None:
+        """Text entries are rendered as narrative in the progress display."""
         msg = AsyncMock()
         pm = ProgressMessageManager(initial_message=msg, start_time=0.0)
         pm.activity_log.append(ActivityEntry(kind="text", content="Let me check that file."))
         text = pm.render()
-        assert "Let me check that file." not in text
+        assert "\U0001f4ac Let me check that file." in text
+
+    def test_text_entry_truncated_in_render(self) -> None:
+        """Long text entries are truncated to 200 chars."""
+        msg = AsyncMock()
+        pm = ProgressMessageManager(initial_message=msg, start_time=0.0)
+        long_text = "x" * 300
+        pm.activity_log.append(ActivityEntry(kind="text", content=long_text))
+        text = pm.render()
+        assert "..." in text
+        assert "x" * 201 not in text
 
     def test_tool_entry_with_detail(self) -> None:
         msg = AsyncMock()
@@ -362,9 +372,9 @@ class TestEndToEndProgressFlow:
         # Verify the rendered output
         text = pm.render(done=True)
 
-        # Text entries are NOT in progress (delivered separately as final response)
-        assert "Let me check that file." not in text
-        assert "I've fixed the bug in foo.py." not in text
+        # Text entries shown as narrative in progress display
+        assert "\U0001f4ac Let me check that file." in text
+        assert "\U0001f4ac I've fixed the bug in foo.py." in text
 
         # Tool calls present
         assert "Read" in text

@@ -269,10 +269,10 @@ class TestStreamHandlerPartialMessages:
         event = self.handler.extract_content(msg)
         assert event.type == "unknown"
 
-    def test_content_block_stop_ignored(self) -> None:
+    def test_content_block_stop_recognized(self) -> None:
         msg = self._make_sdk_stream_event({"type": "content_block_stop"})
         event = self.handler.extract_content(msg)
-        assert event.type == "unknown"
+        assert event.type == "content_block_stop"
 
     def test_message_start_ignored(self) -> None:
         msg = self._make_sdk_stream_event({"type": "message_start"})

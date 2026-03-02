@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from dataclasses import dataclass, field
@@ -24,6 +25,8 @@ class ActivityEntry:
     tool_detail: str = ""
     tool_result: str = ""
     is_running: bool = False
+    started_at: float = 0.0
+    ended_at: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +157,7 @@ def summarize_tool_result(tool_name: str, raw: str) -> str:
 # ---------------------------------------------------------------------------
 
 _ROLLOVER_THRESHOLD = 4000
-_UPDATE_INTERVAL = 2.0  # seconds between Telegram edits
+_UPDATE_INTERVAL = 5.0  # seconds — conservative for supergroup shared rate limits
 
 
 class ProgressMessageManager:
@@ -177,6 +180,7 @@ class ProgressMessageManager:
         self._dot_count: int = 0
         self.activity_log: List[ActivityEntry] = []
         self.messages: List[Message] = [initial_message]
+        self._pending_edit: Optional[Any] = None  # asyncio.Task
 
     # ------------------------------------------------------------------
     # Rendering
@@ -198,8 +202,13 @@ class ProgressMessageManager:
 
         for entry in self.activity_log:
             if entry.kind == "text":
-                # Text is delivered in the final response message;
-                # skip it here to avoid showing the response twice.
+                # Show intermediate narrative text in the progress display
+                # so users can follow what Claude is doing.
+                snippet = entry.content.strip()
+                if snippet:
+                    if len(snippet) > 200:
+                        snippet = snippet[:200] + "..."
+                    lines.append(f"\U0001f4ac {snippet}")
                 continue
             elif entry.kind == "tool":
                 icon = tool_icon(entry.tool_name)
@@ -211,11 +220,24 @@ class ProgressMessageManager:
                     lines.append(f"  \u21b3 {entry.tool_result}")
             elif entry.kind == "thinking":
                 if done or not entry.is_running:
-                    lines.append("\U0001f4ad Thinking (done)")
+                    end = entry.ended_at or time.time()
+                    dur = int(end - entry.started_at) if entry.started_at else 0
+                    if dur:
+                        lines.append(f"\U0001f4ad Thinking ({dur}s)")
+                    else:
+                        lines.append("\U0001f4ad Thinking (done)")
                 else:
+                    dur = (
+                        int(time.time() - entry.started_at)
+                        if entry.started_at
+                        else 0
+                    )
                     self._dot_count = (self._dot_count % 3) + 1
                     dots = "." * self._dot_count
-                    lines.append(f"\U0001f4ad Thinking{dots}")
+                    if dur >= 3:
+                        lines.append(f"\U0001f4ad Thinking ({dur}s){dots}")
+                    else:
+                        lines.append(f"\U0001f4ad Thinking{dots}")
 
         return "\n".join(lines)
 
@@ -224,23 +246,32 @@ class ProgressMessageManager:
     # ------------------------------------------------------------------
 
     async def update(self) -> None:
-        """Edit the Telegram message if the throttle interval has passed.
+        """Schedule a non-blocking Telegram edit if the throttle interval passed.
 
-        Checks rollover before editing.
+        The edit runs as a background task so the stream processing loop
+        is never blocked by Telegram rate-limiting or network latency.
         """
         now = time.time()
         if now - self._last_update < self.EDIT_INTERVAL:
             return
+        self._last_update = now  # claim slot immediately to prevent re-entry
         text = self.render()
         if len(text) >= _ROLLOVER_THRESHOLD:
+            # Rollover creates a new message — must be awaited so
+            # subsequent edits target the new message object.
             await self._rollover()
             return
+        # Cancel stale in-flight edit, fire a new one
+        if self._pending_edit and not self._pending_edit.done():
+            self._pending_edit.cancel()
+        self._pending_edit = asyncio.create_task(self._safe_edit(text))
+
+    async def _safe_edit(self, text: str) -> None:
+        """Best-effort Telegram edit — never raises."""
         try:
             await self._message.edit_text(text)
-            self._last_update = now
         except Exception:
-            # Silently ignore edit errors (e.g. MessageNotModified)
-            self._last_update = now
+            pass
 
     async def _rollover(self) -> None:
         """Finalize current message and send a fresh continuation message."""
@@ -284,8 +315,7 @@ def _close_running_entry(activity_log: List[ActivityEntry]) -> None:
     for entry in reversed(activity_log):
         if entry.is_running:
             entry.is_running = False
-            if entry.kind == "thinking":
-                entry.content = "Thinking (done)"
+            entry.ended_at = time.time()
             return
 
 
@@ -370,7 +400,12 @@ def build_stream_callback(
         elif event_type == "thinking":
             if not (log and log[-1].kind == "thinking" and log[-1].is_running):
                 log.append(
-                    ActivityEntry(kind="thinking", content="Thinking", is_running=True)
+                    ActivityEntry(
+                        kind="thinking",
+                        content="Thinking",
+                        is_running=True,
+                        started_at=time.time(),
+                    )
                 )
 
         elif event_type == "tool_result":

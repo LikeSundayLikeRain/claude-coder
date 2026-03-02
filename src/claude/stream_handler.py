@@ -128,5 +128,8 @@ class StreamHandler:
                 return StreamEvent(type="unknown")
             return StreamEvent(type="unknown")
 
-        # message_start, message_delta, content_block_stop, etc.
+        elif event_type == "content_block_stop":
+            return StreamEvent(type="content_block_stop")
+
+        # message_start, message_delta, etc.
         return StreamEvent(type="unknown")

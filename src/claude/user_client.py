@@ -237,6 +237,9 @@ class UserClient:
                 except MessageParseError:
                     continue
 
+                if message is None:
+                    continue
+
                 event = stream_handler.extract_content(message)
                 is_partial = message.__class__.__name__ == "StreamEvent"
 
@@ -244,8 +247,10 @@ class UserClient:
                     response_text = event.content or ""
                     result_session_id = event.session_id
                     cost = event.cost or 0.0
-                elif event.type == "text" and event.content and item.on_stream:
-                    await item.on_stream(event.type, event.content)
+                    break
+                elif event.type == "text" and event.content:
+                    if item.on_stream:
+                        await item.on_stream(event.type, event.content)
                 elif event.type == "tool_use":
                     if not is_partial:
                         num_turns += 1
@@ -259,6 +264,8 @@ class UserClient:
                         )
                 elif event.type == "thinking" and event.content and item.on_stream:
                     await item.on_stream(event.type, event.content)
+                elif event.type == "content_block_stop" and item.on_stream:
+                    await item.on_stream("content_block_stop", "")
                 elif event.type == "user" and event.content and item.on_stream:
                     await item.on_stream("tool_result", event.content)
 
