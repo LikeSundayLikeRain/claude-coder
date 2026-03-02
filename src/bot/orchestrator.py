@@ -239,8 +239,6 @@ class MessageOrchestrator:
 
     def _register_agentic_handlers(self, app: Application) -> None:
         """Register agentic handlers: commands + text/file/photo."""
-        from .handlers import command
-
         # Commands
         handlers = [
             ("start", self.agentic_start),
@@ -380,12 +378,13 @@ class MessageOrchestrator:
             BotCommand("history", "Show session transcript"),
         ]
 
-        # Group menu shows only General topic commands — topic-specific
-        # commands (/interrupt, /compact, /remove, /history, etc.) are
-        # handled by the bot but don't appear in autocomplete.
         group_commands = [
             BotCommand("start", "Create a project topic"),
+            BotCommand("new", "New topic for same project"),
+            BotCommand("interrupt", "Interrupt running query"),
             BotCommand("status", "Show active sessions"),
+            BotCommand("compact", "Compress context"),
+            BotCommand("model", "Switch Claude model"),
         ]
 
         return {"private": private_commands, "group": group_commands}
@@ -810,7 +809,9 @@ class MessageOrchestrator:
         chat_id, message_thread_id = self._resolve_chat_key(update, context)
         client_manager = context.bot_data.get("client_manager")
         if client_manager:
-            active_client = client_manager.get_active_client(update.effective_user.id, chat_id, message_thread_id)
+            active_client = client_manager.get_active_client(
+                update.effective_user.id, chat_id, message_thread_id
+            )
             if active_client:
                 model_name = active_client.model or "default"
                 if active_client.is_querying:
@@ -1150,64 +1151,7 @@ class MessageOrchestrator:
                 claude_response, context, self.settings, user_id
             )
 
-            # Auto-naming: rename topic after 3 messages if not yet named
-            # Keys namespaced by thread_id since chat_data is per-chat
-            named_key = f"_topic_named_{message_thread_id}"
-            count_key = f"_msg_count_{message_thread_id}"
-            recent_key = f"_recent_messages_{message_thread_id}"
-            if message_thread_id != 0 and not context.chat_data.get(named_key):
-                msg_count = context.chat_data.get(count_key, 0) + 1
-                context.chat_data[count_key] = msg_count
-
-                if msg_count >= 3:
-                    context.chat_data[named_key] = True  # prevent retries
-                    try:
-                        from ..projects.topic_namer import (
-                            generate_topic_name as gen_name,
-                        )
-
-                        # Collect recent messages from this conversation
-                        recent = context.chat_data.get(recent_key, [])
-                        recent.append((query.text or "")[:200])
-                        if claude_response.content:
-                            recent.append(claude_response.content[:200])
-
-                        dir_name = Path(str(current_dir)).name
-                        api_key = self.settings.anthropic_api_key_str
-                        haiku_name = await gen_name(recent, dir_name, api_key=api_key)
-
-                        if haiku_name:
-                            lifecycle_auto: Optional[TopicLifecycleManager] = (
-                                context.bot_data.get("lifecycle_manager")
-                            )
-                            if lifecycle_auto:
-                                await lifecycle_auto.rename_topic(
-                                    context.bot, chat_id, message_thread_id, haiku_name
-                                )
-                                # Update DB
-                                if storage:
-                                    await storage.save_session(
-                                        chat_id=chat_id,
-                                        message_thread_id=message_thread_id,
-                                        user_id=user_id,
-                                        directory=str(current_dir),
-                                        topic_name=haiku_name,
-                                    )
-                                logger.info(
-                                    "topic_auto_named",
-                                    chat_id=chat_id,
-                                    message_thread_id=message_thread_id,
-                                    name=haiku_name,
-                                )
-                    except Exception as e:
-                        logger.warning("auto_naming_failed", error=str(e))
-                else:
-                    # Track messages for naming context
-                    recent = context.chat_data.get(recent_key, [])
-                    recent.append((query.text or "")[:200])
-                    if claude_response.content:
-                        recent.append(claude_response.content[:200])
-                    context.chat_data[recent_key] = recent[-12:]  # keep last 12
+            # Auto-naming disabled — topics use dir_name — session_id[:8] format
 
             # Format response (no reply_markup — strip keyboards)
             formatter = ResponseFormatter(self.settings)
@@ -1805,7 +1749,10 @@ class MessageOrchestrator:
             else str(current_directory)
         )
         if sorted_entries:
-            message = f"*Sessions in `{dir_name}/`*\n\nSelect a session to resume or start a new one:"
+            message = (
+                f"*Sessions in `{dir_name}/`*\n\n"
+                "Select a session to resume or start a new one:"
+            )
         else:
             message = f"*No sessions found in `{dir_name}/`*\n\nStart a new session:"
 
@@ -2078,16 +2025,22 @@ class MessageOrchestrator:
             browse_dir = add_browse_root / add_browse_rel if add_browse_rel else add_browse_root
 
             # Rebuild keyboard with start_ prefixes
-            keyboard_rows = build_browser_keyboard(browse_dir, add_browse_root, multi_root=len(roots) > 1)
+            keyboard_rows = build_browser_keyboard(
+                browse_dir, add_browse_root, multi_root=len(roots) > 1
+            )
             remapped_rows = []
             for row in keyboard_rows:
                 new_row = []
                 for btn in row:
                     data = btn.callback_data or ""
                     if data.startswith("sel:"):
-                        new_row.append(InlineKeyboardButton(btn.text, callback_data=f"start_sel:{data[4:]}"))
+                        new_row.append(InlineKeyboardButton(
+                            btn.text, callback_data=f"start_sel:{data[4:]}"
+                        ))
                     elif data.startswith("nav:"):
-                        new_row.append(InlineKeyboardButton(btn.text, callback_data=f"start_nav:{data[4:]}"))
+                        new_row.append(InlineKeyboardButton(
+                            btn.text, callback_data=f"start_nav:{data[4:]}"
+                        ))
                     else:
                         new_row.append(btn)
                 remapped_rows.append(new_row)
@@ -2108,7 +2061,9 @@ class MessageOrchestrator:
             add_browse_rel = context.user_data.get("add_browse_rel", "")
 
             if value == ".":
-                target_path = add_browse_root / add_browse_rel if add_browse_rel else add_browse_root
+                target_path = (
+                    add_browse_root / add_browse_rel if add_browse_rel else add_browse_root
+                )
             else:
                 target_path = (add_browse_root / value).resolve()
 
@@ -2170,22 +2125,7 @@ class MessageOrchestrator:
 
             # Generate topic name
             if session_id:
-                # Existing session — try Haiku name from transcript
-                from ..projects.topic_namer import (
-                    generate_topic_name as gen_name,
-                )
-
-                transcript = read_session_transcript(
-                    session_id, directory, limit=3
-                )
-                messages = [m.text for m in transcript if m.text]
-                api_key = self.settings.anthropic_api_key_str
-                haiku_name = (
-                    await gen_name(messages, dir_name, api_key=api_key)
-                    if messages
-                    else None
-                )
-                topic_name = haiku_name or f"{dir_name} — {session_id[:8]}"
+                topic_name = f"{dir_name} — {session_id[:8]}"
             else:
                 topic_name = dir_name
 

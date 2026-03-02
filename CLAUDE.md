@@ -86,7 +86,7 @@ context.bot_data["security_validator"]
 - `src/bot/features/` -- Git integration, file handling, quick actions, session export
 - `src/bot/orchestrator.py` -- MessageOrchestrator: routes to agentic or classic handlers, project-topic routing
 - `src/claude/` -- Claude integration: `client_manager.py` (per-(user,chat,thread) clients), `user_client.py` (SDK wrapper), `options.py` (SDK options builder), `stream_handler.py` (message parsing), `session.py` (session resolver), `monitor.py` (tool monitoring), `facade.py` (classic mode), `transcript.py` (session transcript reader for history replay)
-- `src/projects/` -- Multi-project support: `thread_manager.py` (Telegram topic routing, auto-detected for supergroups), `lifecycle.py` (topic close/reopen/delete/rename lifecycle), `topic_namer.py` (Haiku-powered auto-naming after ~3 exchanges)
+- `src/projects/` -- Multi-project support: `thread_manager.py` (Telegram topic routing, auto-detected for supergroups), `lifecycle.py` (topic close/reopen/delete/rename lifecycle), `topic_namer.py` (topic name generation, currently unused — names use `dir_name — session_id[:8]` format)
 - `src/storage/` -- SQLite via aiosqlite, repository pattern (`chat_sessions` and `audit_log` tables only)
 - `src/security/` -- Multi-provider auth (whitelist + token), input validators (with optional `disable_security_patterns`), audit logging
 - `src/events/` -- EventBus (async pub/sub), event types, AgentHandler, EventSecurityMiddleware
@@ -116,7 +116,7 @@ Multi-project concurrent sessions: Topic routing is always active and auto-detec
 
 Topic lifecycle (managed by `TopicLifecycleManager` in `src/projects/lifecycle.py`):
 - Topics auto-close on idle timeout via `close_forum_topic`, and reopen automatically on the next message via `reopen_forum_topic`
-- Topics are auto-named by Haiku after ~3 exchanges via `edit_forum_topic` (see `src/projects/topic_namer.py`)
+- Topics are named `dir_name — session_id[:8]` at creation (Haiku auto-naming disabled)
 - `/history [N]` shows a condensed session transcript in the topic (last N exchanges, default all)
 - `/remove` requires double-confirmation and permanently deletes the topic via `delete_forum_topic`
 - `/resume` is rejected inside topics (session is fixed per topic; use `/new` for a fresh topic)
