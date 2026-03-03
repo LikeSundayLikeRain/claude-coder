@@ -9,7 +9,6 @@ from typing import Any, Callable, Dict, List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -120,9 +119,7 @@ class QuickActionManager:
             ),
         }
 
-    async def get_suggestions(
-        self, session: Any, limit: int = 6
-    ) -> List[QuickAction]:
+    async def get_suggestions(self, session: Any, limit: int = 6) -> List[QuickAction]:
         """Get quick action suggestions based on session context.
 
         Args:

@@ -166,5 +166,3 @@ class ScheduledJobModel:
         for field in ["created_at", "updated_at"]:
             data[field] = _parse_datetime(data.get(field))
         return cls(**data)
-
-

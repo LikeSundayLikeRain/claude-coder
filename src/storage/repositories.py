@@ -63,7 +63,14 @@ class ChatSessionRepository:
                     topic_name = COALESCE(excluded.topic_name, chat_sessions.topic_name),
                     is_active  = 1
                 """,
-                (chat_id, message_thread_id, user_id, directory, session_id, topic_name),
+                (
+                    chat_id,
+                    message_thread_id,
+                    user_id,
+                    directory,
+                    session_id,
+                    topic_name,
+                ),
             )
             await conn.commit()
 
@@ -152,9 +159,7 @@ class ChatSessionRepository:
             row = await cursor.fetchone()
             return ChatSessionModel.from_row(row) if row else None
 
-    async def count_active_by_chat_directory(
-        self, chat_id: int, directory: str
-    ) -> int:
+    async def count_active_by_chat_directory(self, chat_id: int, directory: str) -> int:
         """Count active sessions for a directory in a chat (for auto-suffix naming)."""
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(

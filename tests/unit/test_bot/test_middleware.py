@@ -23,7 +23,6 @@ def mock_settings():
     settings = MagicMock(spec=Settings)
     settings.telegram_token_str = "test:token"
     settings.webhook_url = None
-    settings.agentic_mode = True
     settings.enable_quick_actions = False
     settings.enable_mcp = False
     settings.enable_git_integration = False
@@ -220,5 +219,3 @@ async def test_middleware_wrapper_runs_for_non_bot_updates() -> None:
     await wrapper(update, context)
 
     assert middleware_called is True
-
-

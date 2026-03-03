@@ -227,11 +227,7 @@ class ProgressMessageManager:
                     else:
                         lines.append("\U0001f4ad Thinking (done)")
                 else:
-                    dur = (
-                        int(time.time() - entry.started_at)
-                        if entry.started_at
-                        else 0
-                    )
+                    dur = int(time.time() - entry.started_at) if entry.started_at else 0
                     self._dot_count = (self._dot_count % 3) + 1
                     dots = "." * self._dot_count
                     if dur >= 3:

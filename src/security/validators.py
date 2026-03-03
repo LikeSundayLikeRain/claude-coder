@@ -150,7 +150,9 @@ class SecurityValidator:
         elif approved_directory is not None:
             self.approved_directories = [approved_directory.resolve()]
         else:
-            raise ValueError("Either approved_directory or approved_directories must be provided")
+            raise ValueError(
+                "Either approved_directory or approved_directories must be provided"
+            )
 
         # Keep approved_directory for backward compatibility (points to first directory)
         self.approved_directory = self.approved_directories[0]
@@ -217,7 +219,11 @@ class SecurityValidator:
                     resolved_path=str(target),
                     approved_directories=[str(d) for d in self.approved_directories],
                 )
-                return False, None, "Access denied: path outside all approved directories"
+                return (
+                    False,
+                    None,
+                    "Access denied: path outside all approved directories",
+                )
 
             logger.debug(
                 "Path validation successful",

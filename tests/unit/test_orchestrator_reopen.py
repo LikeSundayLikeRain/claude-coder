@@ -1,4 +1,5 @@
 from unittest.mock import AsyncMock
+
 import pytest
 
 from src.projects.lifecycle import TopicLifecycleManager
@@ -12,7 +13,9 @@ async def test_reopen_called_for_group_topic():
 
     bot = AsyncMock()
     await lifecycle.reopen(bot, chat_id=-1001234, message_thread_id=42)
-    lifecycle.reopen.assert_called_once_with(bot, chat_id=-1001234, message_thread_id=42)
+    lifecycle.reopen.assert_called_once_with(
+        bot, chat_id=-1001234, message_thread_id=42
+    )
 
 
 @pytest.mark.asyncio

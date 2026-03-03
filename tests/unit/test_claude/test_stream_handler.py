@@ -227,45 +227,55 @@ class TestStreamHandlerPartialMessages:
         return msg
 
     def test_content_block_start_tool_use(self) -> None:
-        msg = self._make_sdk_stream_event({
-            "type": "content_block_start",
-            "content_block": {"type": "tool_use", "name": "Read"},
-        })
+        msg = self._make_sdk_stream_event(
+            {
+                "type": "content_block_start",
+                "content_block": {"type": "tool_use", "name": "Read"},
+            }
+        )
         event = self.handler.extract_content(msg)
         assert event.type == "tool_use"
         assert event.tool_name == "Read"
 
     def test_content_block_start_thinking(self) -> None:
-        msg = self._make_sdk_stream_event({
-            "type": "content_block_start",
-            "content_block": {"type": "thinking"},
-        })
+        msg = self._make_sdk_stream_event(
+            {
+                "type": "content_block_start",
+                "content_block": {"type": "thinking"},
+            }
+        )
         event = self.handler.extract_content(msg)
         assert event.type == "thinking"
 
     def test_content_block_delta_text(self) -> None:
-        msg = self._make_sdk_stream_event({
-            "type": "content_block_delta",
-            "delta": {"type": "text_delta", "text": "Hello world"},
-        })
+        msg = self._make_sdk_stream_event(
+            {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "Hello world"},
+            }
+        )
         event = self.handler.extract_content(msg)
         assert event.type == "text"
         assert event.content == "Hello world"
 
     def test_content_block_delta_thinking(self) -> None:
-        msg = self._make_sdk_stream_event({
-            "type": "content_block_delta",
-            "delta": {"type": "thinking_delta", "thinking": "Let me consider..."},
-        })
+        msg = self._make_sdk_stream_event(
+            {
+                "type": "content_block_delta",
+                "delta": {"type": "thinking_delta", "thinking": "Let me consider..."},
+            }
+        )
         event = self.handler.extract_content(msg)
         assert event.type == "thinking"
         assert event.content == "Let me consider..."
 
     def test_content_block_delta_json_ignored(self) -> None:
-        msg = self._make_sdk_stream_event({
-            "type": "content_block_delta",
-            "delta": {"type": "input_json_delta", "partial_json": '{"file'},
-        })
+        msg = self._make_sdk_stream_event(
+            {
+                "type": "content_block_delta",
+                "delta": {"type": "input_json_delta", "partial_json": '{"file'},
+            }
+        )
         event = self.handler.extract_content(msg)
         assert event.type == "unknown"
 

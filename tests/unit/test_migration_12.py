@@ -16,10 +16,10 @@ import pytest
 
 from src.storage.database import DatabaseManager
 
-
 # ---------------------------------------------------------------------------
 # Helper: extract the migration-12 SQL from DatabaseManager
 # ---------------------------------------------------------------------------
+
 
 def _get_migration_sql(version: int) -> str:
     """Return the raw SQL string for a given migration version."""
@@ -33,6 +33,7 @@ def _get_migration_sql(version: int) -> str:
 # ---------------------------------------------------------------------------
 # Fixture: DB at migration-11 state with seed data
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def db_at_11():
@@ -60,9 +61,7 @@ def db_at_11():
             if v > 11:
                 break
             con.executescript(sql)
-            con.execute(
-                "INSERT INTO schema_version (version) VALUES (?)", (v,)
-            )
+            con.execute("INSERT INTO schema_version (version) VALUES (?)", (v,))
             con.commit()
 
         # ----------------------------------------------------------------
@@ -84,7 +83,7 @@ def db_at_11():
             "INSERT INTO user_sessions (user_id, directory, session_id) VALUES (?, ?, ?)",
             [
                 (100, "/projects/alpha", "sess-alpha-100"),
-                (200, "/projects/beta",  "sess-beta-200"),
+                (200, "/projects/beta", "sess-beta-200"),
                 (300, "/projects/gamma", "sess-gamma-300"),  # DM only, no thread
             ],
         )
@@ -95,8 +94,8 @@ def db_at_11():
                (chat_id, message_thread_id, directory, topic_name, is_active)
                VALUES (?, ?, ?, ?, ?)""",
             [
-                (-1001, 10, "/projects/alpha", "Alpha",  True),
-                (-1001, 20, "/projects/beta",  "Beta",   True),
+                (-1001, 10, "/projects/alpha", "Alpha", True),
+                (-1001, 20, "/projects/beta", "Beta", True),
             ],
         )
 
@@ -142,8 +141,14 @@ class TestMigration12:
         cur = db_at_11.execute("PRAGMA table_info(chat_sessions)")
         cols = {row["name"] for row in cur.fetchall()}
         expected = {
-            "chat_id", "message_thread_id", "user_id", "directory",
-            "session_id", "topic_name", "is_active", "created_at",
+            "chat_id",
+            "message_thread_id",
+            "user_id",
+            "directory",
+            "session_id",
+            "topic_name",
+            "is_active",
+            "created_at",
         }
         assert expected <= cols, f"Missing columns: {expected - cols}"
 
@@ -167,7 +172,9 @@ class TestMigration12:
         rows = cur.fetchall()
         assert len(rows) == 2, f"Expected 2 project-thread rows, got {len(rows)}"
 
-    def test_project_thread_alpha_has_session_id(self, db_at_11: sqlite3.Connection) -> None:
+    def test_project_thread_alpha_has_session_id(
+        self, db_at_11: sqlite3.Connection
+    ) -> None:
         """Alpha thread must carry session_id from user_sessions join."""
         self._apply_migration_12(db_at_11)
         cur = db_at_11.execute(
@@ -180,7 +187,9 @@ class TestMigration12:
         assert row["topic_name"] == "Alpha"
         assert row["user_id"] == 100
 
-    def test_project_thread_beta_has_session_id(self, db_at_11: sqlite3.Connection) -> None:
+    def test_project_thread_beta_has_session_id(
+        self, db_at_11: sqlite3.Connection
+    ) -> None:
         """Beta thread must carry session_id from user_sessions join."""
         self._apply_migration_12(db_at_11)
         cur = db_at_11.execute(
@@ -206,7 +215,7 @@ class TestMigration12:
         rows = cur.fetchall()
         assert len(rows) == 1, f"Expected 1 DM row, got {len(rows)}"
         row = rows[0]
-        assert row["chat_id"] == 300        # chat_id = user_id
+        assert row["chat_id"] == 300  # chat_id = user_id
         assert row["user_id"] == 300
         assert row["directory"] == "/projects/gamma"
         assert row["session_id"] == "sess-gamma-300"
@@ -260,9 +269,9 @@ class TestMigration12:
         cur = db_at_11.execute("PRAGMA foreign_key_list(audit_log)")
         fks = cur.fetchall()
         tables_referenced = {row["table"] for row in fks}
-        assert "users" not in tables_referenced, (
-            "audit_log still references users table"
-        )
+        assert (
+            "users" not in tables_referenced
+        ), "audit_log still references users table"
 
     def test_audit_log_data_preserved(self, db_at_11: sqlite3.Connection) -> None:
         """Existing audit_log rows must survive the table rebuild."""
@@ -306,9 +315,7 @@ class TestMigration12:
                 dm = DatabaseManager(f"sqlite:///{Path(d) / 'full.db'}")
                 await dm.initialize()
                 async with dm.get_connection() as conn:
-                    cur = await conn.execute(
-                        "SELECT MAX(version) FROM schema_version"
-                    )
+                    cur = await conn.execute("SELECT MAX(version) FROM schema_version")
                     row = await cur.fetchone()
                     version = row[0]
                 await dm.close()

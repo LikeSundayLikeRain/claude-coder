@@ -1,8 +1,7 @@
 """Message orchestrator — single entry point for all Telegram updates.
 
-Routes messages based on agentic vs classic mode. In agentic mode, provides
-a minimal conversational interface (3 commands, no inline keyboards). In
-classic mode, delegates to existing full-featured handlers.
+Provides a conversational interface with commands, text/file handling,
+and inline keyboards.
 """
 
 from __future__ import annotations
@@ -28,7 +27,6 @@ if TYPE_CHECKING:
     from .attachments import Query
 
 from ..claude.client_manager import ClientManager
-from ..projects.lifecycle import TopicLifecycleManager
 from ..claude.history import (
     append_history_entry,
     check_history_format_health,
@@ -38,6 +36,7 @@ from ..claude.history import (
     read_session_transcript,
 )
 from ..config.settings import Settings
+from ..projects.lifecycle import TopicLifecycleManager
 from .progress import ProgressMessageManager, build_stream_callback
 from .utils.html_format import escape_html
 from .utils.repo_browser import (
@@ -71,8 +70,8 @@ class MessageOrchestrator:
             context.bot_data["settings"] = self.settings
             context.user_data.pop("_thread_context", None)
 
-            is_management_bypass = handler.__name__ in {"sync_threads", "agentic_remove"}
-            is_start_bypass = handler.__name__ in {"start_command", "agentic_start"}
+            is_management_bypass = handler.__name__ in {"sync_threads", "handle_remove"}
+            is_start_bypass = handler.__name__ in {"start_command", "handle_start"}
             message_thread_id = self._extract_message_thread_id(update)
 
             chat = update.effective_chat
@@ -98,9 +97,7 @@ class MessageOrchestrator:
                     manager = context.bot_data.get("project_threads_manager")
                     if manager:
                         directory = (
-                            await manager.resolve_directory(
-                                chat.id, message_thread_id
-                            )
+                            await manager.resolve_directory(chat.id, message_thread_id)
                             or ""
                         )
                     context.user_data["_thread_context"] = {
@@ -231,27 +228,24 @@ class MessageOrchestrator:
             await update.effective_message.reply_text(message, parse_mode="HTML")
 
     def register_handlers(self, app: Application) -> None:
-        """Register handlers based on mode."""
-        if self.settings.agentic_mode:
-            self._register_agentic_handlers(app)
-        else:
-            self._register_classic_handlers(app)
+        """Register all handlers."""
+        self._register_handlers(app)
 
-    def _register_agentic_handlers(self, app: Application) -> None:
-        """Register agentic handlers: commands + text/file/photo."""
+    def _register_handlers(self, app: Application) -> None:
+        """Register handlers: commands + text/file/photo."""
         # Commands
         handlers = [
-            ("start", self.agentic_start),
-            ("new", self.agentic_new),
+            ("start", self.handle_start),
+            ("new", self.handle_new),
             ("interrupt", self.handle_interrupt),
-            ("status", self.agentic_status),
-            ("compact", self.agentic_compact),
+            ("status", self.handle_status),
+            ("compact", self.handle_compact),
             ("model", self.handle_model),
-            ("repo", self.agentic_repo),
-            ("resume", self.agentic_resume),
-            ("commands", self.agentic_commands),
-            ("remove", self.agentic_remove),
-            ("history", self.agentic_history),
+            ("repo", self.handle_repo),
+            ("resume", self.handle_resume),
+            ("commands", self.handle_commands),
+            ("remove", self.handle_remove),
+            ("history", self.handle_history),
         ]
 
         for cmd, handler in handlers:
@@ -263,7 +257,7 @@ class MessageOrchestrator:
         app.add_handler(
             MessageHandler(
                 filters.COMMAND,
-                self._inject_deps(self.agentic_text),
+                self._inject_deps(self.handle_text),
             ),
         )
 
@@ -271,7 +265,7 @@ class MessageOrchestrator:
         app.add_handler(
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND,
-                self._inject_deps(self.agentic_text),
+                self._inject_deps(self.handle_text),
             ),
             group=10,
         )
@@ -280,7 +274,7 @@ class MessageOrchestrator:
         app.add_handler(
             MessageHandler(
                 filters.PHOTO | filters.Document.ALL,
-                self._inject_deps(self.agentic_attachment),
+                self._inject_deps(self.handle_attachment),
             ),
             group=10,
         )
@@ -288,83 +282,15 @@ class MessageOrchestrator:
         # Callbacks for cd:, session:, skill:, and model: patterns
         app.add_handler(
             CallbackQueryHandler(
-                self._inject_deps(self._agentic_callback),
+                self._inject_deps(self._handle_callback),
                 pattern=r"^(cd:|nav:|sel:|start_nav:|start_sel:|start_ses:|session:|skill:|model:)",
             )
         )
 
-        logger.info("Agentic handlers registered")
-
-    def _register_classic_handlers(self, app: Application) -> None:
-        """Register full classic handler set (moved from core.py)."""
-        from .handlers import callback, command, message
-
-        handlers = [
-            ("start", command.start_command),
-            ("help", command.help_command),
-            ("new", command.new_session),
-            ("continue", command.continue_session),
-            ("end", command.end_session),
-            ("ls", command.list_files),
-            ("cd", command.change_directory),
-            ("pwd", command.print_working_directory),
-            ("projects", command.show_projects),
-            ("status", command.session_status),
-            ("export", command.export_session),
-            ("actions", command.quick_actions),
-            ("git", command.git_command),
-            ("sync_threads", command.sync_threads),
-        ]
-
-        for cmd, handler in handlers:
-            app.add_handler(CommandHandler(cmd, self._inject_deps(handler)))
-
-        app.add_handler(
-            MessageHandler(
-                filters.TEXT & ~filters.COMMAND,
-                self._inject_deps(message.handle_text_message),
-            ),
-            group=10,
-        )
-        app.add_handler(
-            MessageHandler(
-                filters.Document.ALL, self._inject_deps(message.handle_document)
-            ),
-            group=10,
-        )
-        app.add_handler(
-            MessageHandler(filters.PHOTO, self._inject_deps(message.handle_photo)),
-            group=10,
-        )
-        app.add_handler(
-            CallbackQueryHandler(self._inject_deps(callback.handle_callback_query))
-        )
-
-        logger.info("Classic handlers registered (13 commands + full handler set)")
+        logger.info("Handlers registered")
 
     async def get_bot_commands(self) -> Any:
         """Return bot commands. Dict of scope->commands for private and group contexts."""
-        if not self.settings.agentic_mode:
-            # Classic mode
-            commands = [
-                BotCommand("start", "Start bot and show help"),
-                BotCommand("help", "Show available commands"),
-                BotCommand("new", "Clear context and start fresh session"),
-                BotCommand("continue", "Explicitly continue last session"),
-                BotCommand("end", "End current session and clear context"),
-                BotCommand("ls", "List files in current directory"),
-                BotCommand("cd", "Change directory (resumes project session)"),
-                BotCommand("pwd", "Show current directory"),
-                BotCommand("projects", "Show all projects"),
-                BotCommand("status", "Show session status"),
-                BotCommand("export", "Export current session"),
-                BotCommand("actions", "Show quick actions"),
-                BotCommand("git", "Git repository commands"),
-                BotCommand("sync_threads", "Sync project topics"),
-            ]
-            return commands
-
-        # Agentic mode
         private_commands = [
             BotCommand("start", "Start the bot"),
             BotCommand("new", "Start a fresh session"),
@@ -389,7 +315,7 @@ class MessageOrchestrator:
 
         return {"private": private_commands, "group": group_commands}
 
-    # --- Agentic handlers ---
+    # --- Handlers ---
 
     async def handle_interrupt(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -401,7 +327,9 @@ class MessageOrchestrator:
         chat_id, message_thread_id = self._resolve_chat_key(update, context)
         client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
         if client_manager:
-            client = client_manager.get_active_client(user_id, chat_id, message_thread_id)
+            client = client_manager.get_active_client(
+                user_id, chat_id, message_thread_id
+            )
             if client and client.is_querying:
                 await client_manager.interrupt(user_id, chat_id, message_thread_id)
                 await update.message.reply_text("Interrupting current query...")
@@ -434,7 +362,7 @@ class MessageOrchestrator:
     ) -> None:
         """Handle model selection callback.
 
-        Note: query.answer() is already called by _agentic_callback.
+        Note: query.answer() is already called by _handle_callback.
         """
         query = update.callback_query
         if not query or not query.data:
@@ -458,12 +386,14 @@ class MessageOrchestrator:
         chat_id, message_thread_id = self._resolve_chat_key(update, context)
         client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
         if client_manager:
-            await client_manager.set_model(user_id, chat_id, message_thread_id, model, betas)
+            await client_manager.set_model(
+                user_id, chat_id, message_thread_id, model, betas
+            )
             await query.edit_message_text(f"Model set to: {label}")
         else:
             await query.edit_message_text("Model switching is not available.")
 
-    async def agentic_start(
+    async def handle_start(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Start: welcome in DM/topic, wizard in supergroup General."""
@@ -507,7 +437,9 @@ class MessageOrchestrator:
         """Wizard step 1: show directory browser with start_ prefixed callbacks."""
         browse_dir = self.settings.approved_directories[0]
         multi_root = len(self.settings.approved_directories) > 1
-        keyboard_rows = build_browser_keyboard(browse_dir, browse_dir, multi_root=multi_root)
+        keyboard_rows = build_browser_keyboard(
+            browse_dir, browse_dir, multi_root=multi_root
+        )
 
         # Remap callbacks: sel: -> start_sel:, nav: -> start_nav:
         remapped_rows = []
@@ -570,9 +502,9 @@ class MessageOrchestrator:
                     session_id=entry.session_id,
                     project_dir=entry.project,
                 )
-                display_name = (
-                    first_msg or entry.display or entry.session_id[:12]
-                )[:40]
+                display_name = (first_msg or entry.display or entry.session_id[:12])[
+                    :40
+                ]
                 button_label = f"{time_str} — {display_name}"
                 keyboard_rows.append(
                     [
@@ -606,7 +538,7 @@ class MessageOrchestrator:
         else:
             await message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
 
-    async def agentic_new(
+    async def handle_new(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Start a fresh SDK session in the current directory."""
@@ -624,7 +556,9 @@ class MessageOrchestrator:
                 dir_name = Path(str(current_dir)).name
                 existing = await manager.list_topics(chat.id)
                 existing_names = [t.topic_name for t in existing]
-                topic_name = manager.generate_topic_name(str(current_dir), existing_names)
+                topic_name = manager.generate_topic_name(
+                    str(current_dir), existing_names
+                )
 
                 try:
                     mapping = await manager.create_topic(
@@ -644,7 +578,9 @@ class MessageOrchestrator:
                             directory=str(current_dir),
                             session_id=None,
                             force_new=True,
-                            approved_directory=str(self.settings.approved_directories[0]),
+                            approved_directory=str(
+                                self.settings.approved_directories[0]
+                            ),
                         )
                         # Rename with session snippet
                         if client.session_id:
@@ -717,7 +653,7 @@ class MessageOrchestrator:
             "Session reset. Will connect on your next message.",
         )
 
-    async def agentic_status(
+    async def handle_status(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show current session status with workspace and session info."""
@@ -727,7 +663,9 @@ class MessageOrchestrator:
 
         # General topic dashboard: show all active sessions across projects
         if context.user_data.get("_in_general_topic"):
-            client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
+            client_manager: Optional[ClientManager] = context.bot_data.get(
+                "client_manager"
+            )
             if client_manager:
                 clients = client_manager.get_all_clients_for_user(user_id)
                 if clients:
@@ -837,7 +775,7 @@ class MessageOrchestrator:
             parse_mode="HTML",
         )
 
-    async def agentic_compact(
+    async def handle_compact(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Compress conversation context while keeping session continuity."""
@@ -955,29 +893,12 @@ class MessageOrchestrator:
         """Run a query via ClientManager, streaming events through on_stream.
 
         Returns a ClaudeResponse for compatibility with existing formatting code.
-        Falls back to ClaudeIntegration if ClientManager is not available.
         """
         from ..claude.sdk_integration import ClaudeResponse  # noqa: F811
 
         client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
         if client_manager is None:
-            # Safety fallback / classic-mode compatibility: in agentic mode
-            # client_manager is always set up in main.py, so this branch is
-            # only reachable if running in classic mode or during tests that
-            # don't provide a ClientManager.
-            claude_integration = context.bot_data.get("claude_integration")
-            if not claude_integration:
-                raise RuntimeError(
-                    "Neither client_manager nor claude_integration available"
-                )
-            return await claude_integration.run_command(
-                prompt=query.text or "",
-                working_directory=current_dir,
-                user_id=user_id,
-                session_id=session_id,
-                on_stream=on_stream,
-                force_new=force_new,
-            )
+            raise RuntimeError("client_manager not available")
 
         directory = str(current_dir)
         approved_dir = str(self.settings.approved_directory)
@@ -1050,7 +971,7 @@ class MessageOrchestrator:
     ) -> bool:
         """Shared query execution: progress, session, Claude call, response.
 
-        Handles steps common to both agentic_text and agentic_attachment:
+        Handles steps common to both handle_text and handle_attachment:
         client sync, directory restore, progress message, heartbeat,
         _run_claude_query, session/history update, response formatting,
         error handling, and reply delivery.
@@ -1091,7 +1012,9 @@ class MessageOrchestrator:
 
         # Reopen topic if it was closed (idle timeout)
         if message_thread_id != 0:
-            lifecycle: Optional[TopicLifecycleManager] = context.bot_data.get("lifecycle_manager")
+            lifecycle: Optional[TopicLifecycleManager] = context.bot_data.get(
+                "lifecycle_manager"
+            )
             if lifecycle:
                 await lifecycle.reopen(context.bot, chat_id, message_thread_id)
 
@@ -1205,7 +1128,7 @@ class MessageOrchestrator:
 
         return success
 
-    async def agentic_text(
+    async def handle_text(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Direct Claude passthrough. Simple progress. No suggestions."""
@@ -1215,7 +1138,7 @@ class MessageOrchestrator:
         message_text = update.message.text
 
         logger.info(
-            "Agentic text message",
+            "Text message",
             user_id=user_id,
             message_length=len(message_text),
         )
@@ -1294,7 +1217,7 @@ class MessageOrchestrator:
                 success=success,
             )
 
-    async def agentic_attachment(
+    async def handle_attachment(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Process photo or document upload -> Claude via Query pipeline."""
@@ -1309,7 +1232,7 @@ class MessageOrchestrator:
             return
 
         logger.info(
-            "agentic_attachment",
+            "handle_attachment",
             user_id=user_id,
             num_items=len(updates),
         )
@@ -1351,7 +1274,7 @@ class MessageOrchestrator:
                 success=success,
             )
 
-    async def agentic_repo(
+    async def handle_repo(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Navigable directory browser.
@@ -1490,7 +1413,12 @@ class MessageOrchestrator:
 
         # Disconnect active SDK session for the current chat key
         client_manager = context.bot_data.get("client_manager")
-        if client_manager and user_id and chat_id is not None and message_thread_id is not None:
+        if (
+            client_manager
+            and user_id
+            and chat_id is not None
+            and message_thread_id is not None
+        ):
             await client_manager.disconnect(user_id, chat_id, message_thread_id)
 
         is_git = (target_path / ".git").is_dir()
@@ -1505,7 +1433,7 @@ class MessageOrchestrator:
         else:
             await message.reply_text(text, parse_mode="HTML")
 
-    async def agentic_commands(
+    async def handle_commands(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show available skills as inline keyboard buttons."""
@@ -1515,7 +1443,9 @@ class MessageOrchestrator:
 
         commands: list[dict] = []
         if client_manager:
-            commands = client_manager.get_available_commands(user_id, chat_id, message_thread_id)
+            commands = client_manager.get_available_commands(
+                user_id, chat_id, message_thread_id
+            )
 
         if not commands:
             await update.message.reply_text(
@@ -1568,7 +1498,7 @@ class MessageOrchestrator:
             reply_markup=reply_markup,
         )
 
-    async def agentic_remove(
+    async def handle_remove(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Remove this topic — double-confirm then delete permanently."""
@@ -1608,7 +1538,9 @@ class MessageOrchestrator:
             await manager.repository.deactivate(chat_id, message_thread_id)
 
         # Delete topic (falls back to close)
-        lifecycle: Optional[TopicLifecycleManager] = context.bot_data.get("lifecycle_manager")
+        lifecycle: Optional[TopicLifecycleManager] = context.bot_data.get(
+            "lifecycle_manager"
+        )
         if lifecycle:
             await lifecycle.delete_confirmed(context.bot, chat_id, message_thread_id)
         else:
@@ -1620,9 +1552,11 @@ class MessageOrchestrator:
             except Exception:
                 pass
 
-        logger.info("topic_deleted", chat_id=chat_id, message_thread_id=message_thread_id)
+        logger.info(
+            "topic_deleted", chat_id=chat_id, message_thread_id=message_thread_id
+        )
 
-    async def agentic_history(
+    async def handle_history(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show session transcript history in this topic."""
@@ -1643,7 +1577,9 @@ class MessageOrchestrator:
                 return
 
         # Resolve session
-        session = await storage.load_session(chat_id, message_thread_id) if storage else None
+        session = (
+            await storage.load_session(chat_id, message_thread_id) if storage else None
+        )
         if not session or not session.session_id:
             await update.message.reply_text("No active session in this topic.")
             return
@@ -1662,7 +1598,7 @@ class MessageOrchestrator:
         for msg in messages:
             await update.message.reply_text(msg)
 
-    async def agentic_resume(
+    async def handle_resume(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show session picker for current directory."""
@@ -1762,7 +1698,7 @@ class MessageOrchestrator:
             reply_markup=reply_markup,
         )
 
-    async def _agentic_callback(
+    async def _handle_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle cd:, session:, skill:, and model: callbacks."""
@@ -2010,7 +1946,9 @@ class MessageOrchestrator:
                 context.user_data["add_browse_rel"] = new_rel
             else:
                 browse_dir = (add_browse_root / value).resolve()
-                if not browse_dir.is_dir() or not browse_dir.is_relative_to(add_browse_root):
+                if not browse_dir.is_dir() or not browse_dir.is_relative_to(
+                    add_browse_root
+                ):
                     await query.edit_message_text(
                         f"Directory not found: <code>{escape_html(value)}</code>",
                         parse_mode="HTML",
@@ -2022,7 +1960,9 @@ class MessageOrchestrator:
                 context.user_data["add_browse_root"] = add_browse_root
 
             add_browse_rel = context.user_data["add_browse_rel"]
-            browse_dir = add_browse_root / add_browse_rel if add_browse_rel else add_browse_root
+            browse_dir = (
+                add_browse_root / add_browse_rel if add_browse_rel else add_browse_root
+            )
 
             # Rebuild keyboard with start_ prefixes
             keyboard_rows = build_browser_keyboard(
@@ -2034,13 +1974,17 @@ class MessageOrchestrator:
                 for btn in row:
                     data = btn.callback_data or ""
                     if data.startswith("sel:"):
-                        new_row.append(InlineKeyboardButton(
-                            btn.text, callback_data=f"start_sel:{data[4:]}"
-                        ))
+                        new_row.append(
+                            InlineKeyboardButton(
+                                btn.text, callback_data=f"start_sel:{data[4:]}"
+                            )
+                        )
                     elif data.startswith("nav:"):
-                        new_row.append(InlineKeyboardButton(
-                            btn.text, callback_data=f"start_nav:{data[4:]}"
-                        ))
+                        new_row.append(
+                            InlineKeyboardButton(
+                                btn.text, callback_data=f"start_nav:{data[4:]}"
+                            )
+                        )
                     else:
                         new_row.append(btn)
                 remapped_rows.append(new_row)
@@ -2062,7 +2006,9 @@ class MessageOrchestrator:
 
             if value == ".":
                 target_path = (
-                    add_browse_root / add_browse_rel if add_browse_rel else add_browse_root
+                    add_browse_root / add_browse_rel
+                    if add_browse_rel
+                    else add_browse_root
                 )
             else:
                 target_path = (add_browse_root / value).resolve()
@@ -2074,7 +2020,9 @@ class MessageOrchestrator:
                 )
                 return
 
-            if not any(target_path == r or target_path.is_relative_to(r) for r in roots):
+            if not any(
+                target_path == r or target_path.is_relative_to(r) for r in roots
+            ):
                 await query.edit_message_text("Access denied.", parse_mode="HTML")
                 return
 
@@ -2114,7 +2062,7 @@ class MessageOrchestrator:
                     topic_label = existing.topic_name or dir_name
                     await query.edit_message_text(
                         f"Session already has a topic: "
-                        f"<a href=\"{topic_link}\">{escape_html(topic_label)}</a>",
+                        f'<a href="{topic_link}">{escape_html(topic_label)}</a>',
                         parse_mode="HTML",
                     )
                     # Cleanup wizard state
@@ -2164,9 +2112,7 @@ class MessageOrchestrator:
                         directory=directory,
                         session_id=session_id,
                         force_new=(session_id is None),
-                        approved_directory=str(
-                            self.settings.approved_directories[0]
-                        ),
+                        approved_directory=str(self.settings.approved_directories[0]),
                     )
                     # For new sessions, rename topic with session snippet
                     if session_id is None and client.session_id:
@@ -2204,9 +2150,7 @@ class MessageOrchestrator:
                         entries = read_full_transcript(session_id, directory)
                         if entries:
                             # Single message with as much recent history as fits
-                            history_messages = format_condensed(
-                                entries, last_n=20
-                            )
+                            history_messages = format_condensed(entries, last_n=20)
                             if history_messages:
                                 await context.bot.send_message(
                                     chat_id=chat_id,
@@ -2214,13 +2158,9 @@ class MessageOrchestrator:
                                     message_thread_id=thread_id,
                                 )
                             # Mark as replayed so _execute_query skips it
-                            context.chat_data[
-                                f"_history_replayed_{thread_id}"
-                            ] = True
+                            context.chat_data[f"_history_replayed_{thread_id}"] = True
                     except Exception as e:
-                        logger.debug(
-                            "wizard_transcript_send_failed", error=str(e)
-                        )
+                        logger.debug("wizard_transcript_send_failed", error=str(e))
 
             except Exception as e:
                 logger.error("start_wizard_create_failed", error=str(e))
@@ -2371,7 +2311,9 @@ class MessageOrchestrator:
             "client_manager"
         )
         if client_manager_cd:
-            await client_manager_cd.disconnect(query.from_user.id, _cd_chat_id, _cd_thread_id)
+            await client_manager_cd.disconnect(
+                query.from_user.id, _cd_chat_id, _cd_thread_id
+            )
 
         is_git = (new_path / ".git").is_dir()
         git_badge = " (git)" if is_git else ""

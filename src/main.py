@@ -12,7 +12,6 @@ import structlog
 
 from src import __version__
 from src.bot.core import ClaudeCodeBot
-from src.claude import ClaudeIntegration
 from src.claude.client_manager import DEFAULT_IDLE_TIMEOUT_SECONDS, ClientManager
 from src.claude.options import OptionsBuilder
 from src.claude.sdk_integration import ClaudeSDKManager
@@ -159,16 +158,11 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     audit_storage = InMemoryAuditStorage()  # TODO: Use database storage in production
     audit_logger = AuditLogger(audit_storage)
 
-    # Create Claude SDK manager and integration facade
+    # Create Claude SDK manager
     logger.info("Using Claude Python SDK integration")
     sdk_manager = ClaudeSDKManager(config, security_validator=security_validator)
 
-    claude_integration = ClaudeIntegration(
-        config=config,
-        sdk_manager=sdk_manager,
-    )
-
-    # Create ClientManager for persistent SDK connections (agentic mode)
+    # Create ClientManager for persistent SDK connections
     options_builder = OptionsBuilder(
         security_validator=security_validator,
         cli_path=config.claude_cli_path,
@@ -194,7 +188,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     # Agent handler — translates events into Claude executions
     agent_handler = AgentHandler(
         event_bus=event_bus,
-        claude_integration=claude_integration,
+        sdk_manager=sdk_manager,
         default_working_directory=config.approved_directory,
         default_user_id=config.allowed_users[0] if config.allowed_users else 0,
     )
@@ -205,7 +199,6 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         "auth_manager": auth_manager,
         "security_validator": security_validator,
         "audit_logger": audit_logger,
-        "claude_integration": claude_integration,
         "client_manager": client_manager,
         "storage": storage,
         "event_bus": event_bus,
@@ -222,7 +215,6 @@ async def create_application(config: Settings) -> Dict[str, Any]:
 
     return {
         "bot": bot,
-        "claude_integration": claude_integration,
         "client_manager": client_manager,
         "storage": storage,
         "config": config,
@@ -238,7 +230,6 @@ async def run_application(app: Dict[str, Any]) -> None:
     """Run the application with graceful shutdown handling."""
     logger = structlog.get_logger()
     bot: ClaudeCodeBot = app["bot"]
-    claude_integration: ClaudeIntegration = app["claude_integration"]
     client_manager: ClientManager = app["client_manager"]
     storage: Storage = app["storage"]
     config: Settings = app["config"]
@@ -363,7 +354,6 @@ async def run_application(app: Dict[str, Any]) -> None:
             await event_bus.stop()
             await bot.stop()
             await client_manager.disconnect_all()
-            await claude_integration.shutdown()
             await storage.close()
         except Exception as e:
             logger.error("Error during shutdown", error=str(e))

@@ -32,9 +32,7 @@ class TopicLifecycleManager:
         except TelegramError as e:
             logger.debug("close_topic_failed", error=str(e))
 
-    async def reopen(
-        self, bot: Bot, chat_id: int, message_thread_id: int
-    ) -> None:
+    async def reopen(self, bot: Bot, chat_id: int, message_thread_id: int) -> None:
         """Reopen a closed topic. Silently ignores errors."""
         try:
             await bot.reopen_forum_topic(

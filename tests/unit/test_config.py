@@ -269,7 +269,6 @@ def test_log_level_validation():
         assert settings.log_level == "DEBUG"
 
 
-
 def test_computed_properties(tmp_path):
     """Test computed properties."""
     test_dir = tmp_path / "projects"

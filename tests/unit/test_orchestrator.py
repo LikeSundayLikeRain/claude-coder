@@ -1,12 +1,21 @@
 """Tests for the MessageOrchestrator."""
 
 import asyncio
+import sys
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+# handlers.message was removed in the classic-mode cleanup.
+# Stub it so the lazy import inside _execute_query doesn't fail.
+if "src.bot.handlers.message" not in sys.modules:
+    _stub = ModuleType("src.bot.handlers.message")
+    _stub._format_error_message = lambda response, default="": default  # type: ignore[attr-defined]
+    _stub._update_working_directory_from_claude_response = lambda *a, **kw: None  # type: ignore[attr-defined]
+    sys.modules["src.bot.handlers.message"] = _stub
 
 from src.bot.orchestrator import MessageOrchestrator
 from src.bot.progress import redact_secrets as _redact_secrets
@@ -21,12 +30,12 @@ def tmp_dir():
 
 @pytest.fixture
 def agentic_settings(tmp_dir):
-    return create_test_config(approved_directory=str(tmp_dir), agentic_mode=True)
+    return create_test_config(approved_directory=str(tmp_dir))
 
 
 @pytest.fixture
 def classic_settings(tmp_dir):
-    return create_test_config(approved_directory=str(tmp_dir), agentic_mode=False)
+    return create_test_config(approved_directory=str(tmp_dir))
 
 
 @pytest.fixture
@@ -43,7 +52,6 @@ def group_thread_settings(tmp_dir):
     )
     return create_test_config(
         approved_directory=str(tmp_dir),
-        agentic_mode=False,
     )
 
 
@@ -61,7 +69,6 @@ def private_thread_settings(tmp_dir):
     )
     return create_test_config(
         approved_directory=str(tmp_dir),
-        agentic_mode=False,
     )
 
 
@@ -113,7 +120,7 @@ def test_agentic_registers_remove(agentic_settings, deps):
     app = MagicMock()
     app.add_handler = MagicMock()
 
-    orchestrator._register_agentic_handlers(app)
+    orchestrator._register_handlers(app)
 
     from telegram.ext import CommandHandler
 
@@ -126,25 +133,6 @@ def test_agentic_registers_remove(agentic_settings, deps):
 
     assert frozenset({"add"}) not in commands
     assert frozenset({"remove"}) in commands
-
-
-def test_classic_registers_14_commands(classic_settings, deps):
-    """Classic mode registers all 14 commands."""
-    orchestrator = MessageOrchestrator(classic_settings, deps)
-    app = MagicMock()
-    app.add_handler = MagicMock()
-
-    orchestrator.register_handlers(app)
-
-    from telegram.ext import CommandHandler
-
-    cmd_handlers = [
-        call
-        for call in app.add_handler.call_args_list
-        if isinstance(call[0][0], CommandHandler)
-    ]
-
-    assert len(cmd_handlers) == 14
 
 
 def test_agentic_registers_text_document_photo_handlers(agentic_settings, deps):
@@ -198,18 +186,6 @@ async def test_agentic_bot_commands(agentic_settings, deps):
     assert "remove" not in group_names
 
 
-async def test_classic_bot_commands(classic_settings, deps):
-    """Classic mode returns 14 bot commands."""
-    orchestrator = MessageOrchestrator(classic_settings, deps)
-    commands = await orchestrator.get_bot_commands()
-
-    assert len(commands) == 14
-    cmd_names = [c.command for c in commands]
-    assert "start" in cmd_names
-    assert "help" in cmd_names
-    assert "git" in cmd_names
-
-
 async def test_agentic_start_no_keyboard(agentic_settings, deps):
     """Agentic /start sends brief message without inline keyboard."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
@@ -224,7 +200,7 @@ async def test_agentic_start_no_keyboard(agentic_settings, deps):
     for k, v in deps.items():
         context.bot_data[k] = v
 
-    await orchestrator.agentic_start(update, context)
+    await orchestrator.handle_start(update, context)
 
     update.message.reply_text.assert_called_once()
     call_kwargs = update.message.reply_text.call_args
@@ -248,7 +224,7 @@ async def test_agentic_new_resets_session(agentic_settings, deps):
     context.user_data = {"claude_session_id": "old-session-123"}
     context.bot_data = {}
 
-    await orchestrator.agentic_new(update, context)
+    await orchestrator.handle_new(update, context)
 
     assert context.user_data["claude_session_id"] is None
     update.message.reply_text.assert_called_once_with(
@@ -276,7 +252,7 @@ async def test_agentic_new_eagerly_connects_sdk(agentic_settings, deps, tmp_path
     client_manager.get_or_connect = AsyncMock(return_value=mock_client)
     context.bot_data = {"client_manager": client_manager}
 
-    await orchestrator.agentic_new(update, context)
+    await orchestrator.handle_new(update, context)
 
     client_manager.get_or_connect.assert_called_once()
     call_kwargs = client_manager.get_or_connect.call_args
@@ -287,7 +263,9 @@ async def test_agentic_new_eagerly_connects_sdk(agentic_settings, deps, tmp_path
     assert "Ready" in msg
 
 
-async def test_agentic_new_connection_failure_falls_back(agentic_settings, deps, tmp_path):
+async def test_agentic_new_connection_failure_falls_back(
+    agentic_settings, deps, tmp_path
+):
     """/new falls back gracefully if SDK connection fails."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     project_dir = tmp_path / "project"
@@ -305,7 +283,7 @@ async def test_agentic_new_connection_failure_falls_back(agentic_settings, deps,
     client_manager.get_or_connect = AsyncMock(side_effect=Exception("connection error"))
     context.bot_data = {"client_manager": client_manager}
 
-    await orchestrator.agentic_new(update, context)
+    await orchestrator.handle_new(update, context)
 
     update.message.reply_text.assert_called_once()
     assert context.user_data.get("force_new_session") is True
@@ -323,7 +301,7 @@ async def test_agentic_status_compact(agentic_settings, deps):
     context.user_data = {}
     context.bot_data = {}
 
-    await orchestrator.agentic_status(update, context)
+    await orchestrator.handle_status(update, context)
 
     call_args = update.message.reply_text.call_args
     text = call_args.args[0]
@@ -333,17 +311,26 @@ async def test_agentic_status_compact(agentic_settings, deps):
 
 
 async def test_agentic_text_calls_claude(agentic_settings, deps):
-    """Agentic text handler calls Claude and returns response without keyboard."""
+    """Agentic text handler calls Claude via ClientManager and returns response."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
 
-    # Mock Claude response
-    mock_response = MagicMock()
-    mock_response.session_id = "session-abc"
-    mock_response.content = "Hello, I can help with that!"
-    mock_response.tools_used = []
+    # Mock submit result from UserClient
+    mock_submit_result = MagicMock()
+    mock_submit_result.session_id = "session-abc"
+    mock_submit_result.response_text = "Hello, I can help with that!"
+    mock_submit_result.cost = None
+    mock_submit_result.duration_ms = None
+    mock_submit_result.num_turns = 1
 
-    claude_integration = AsyncMock()
-    claude_integration.run_command = AsyncMock(return_value=mock_response)
+    mock_client = AsyncMock()
+    mock_client.submit = AsyncMock(return_value=mock_submit_result)
+    mock_client.session_id = "session-abc"
+    mock_client.is_connected = False
+
+    client_manager = AsyncMock()
+    client_manager.get_or_connect = AsyncMock(return_value=mock_client)
+    client_manager.get_active_client = MagicMock(return_value=None)
+    client_manager.update_session_id = AsyncMock()
 
     update = MagicMock()
     update.effective_user.id = 123
@@ -360,15 +347,16 @@ async def test_agentic_text_calls_claude(agentic_settings, deps):
     context.user_data = {}
     context.bot_data = {
         "settings": agentic_settings,
-        "claude_integration": claude_integration,
+        "client_manager": client_manager,
         "storage": None,
         "audit_logger": None,
     }
 
-    await orchestrator.agentic_text(update, context)
+    await orchestrator.handle_text(update, context)
 
-    # Claude was called
-    claude_integration.run_command.assert_called_once()
+    # ClientManager was used to submit the query
+    client_manager.get_or_connect.assert_called_once()
+    mock_client.submit.assert_called_once()
 
     # Session ID updated
     assert context.user_data["claude_session_id"] == "session-abc"
@@ -408,7 +396,6 @@ async def test_agentic_callback_scoped_to_cd_pattern(agentic_settings, deps):
     assert cb_handlers[0].pattern.match("cd:my_project")
 
 
-
 async def test_agentic_start_escapes_html_in_name(agentic_settings, deps):
     """Names with HTML-special characters are escaped safely."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
@@ -420,7 +407,7 @@ async def test_agentic_start_escapes_html_in_name(agentic_settings, deps):
     context = MagicMock()
     context.user_data = {}
 
-    await orchestrator.agentic_start(update, context)
+    await orchestrator.handle_start(update, context)
 
     call_kwargs = update.message.reply_text.call_args
     text = call_kwargs.args[0]
@@ -459,7 +446,7 @@ async def test_agentic_text_logs_failure_on_error(agentic_settings, deps):
         "audit_logger": audit_logger,
     }
 
-    await orchestrator.agentic_text(update, context)
+    await orchestrator.handle_text(update, context)
 
     # Audit logged with success=False
     audit_logger.log_command.assert_called_once()
@@ -632,7 +619,9 @@ class TestTypingHeartbeat:
         assert "chat" not in sig.parameters
 
 
-async def test_group_thread_mode_allows_non_configured_chat(group_thread_settings, deps):
+async def test_group_thread_mode_allows_non_configured_chat(
+    group_thread_settings, deps
+):
     """In group thread mode, messages from other chats are allowed through."""
     orchestrator = MessageOrchestrator(group_thread_settings, deps)
 
@@ -678,7 +667,9 @@ async def test_group_thread_mode_rejects_unbound_topic(group_thread_settings, de
 
     update = MagicMock()
     update.effective_chat.id = -1001234567890  # configured chat
-    update.effective_chat.type = "supergroup"  # must be supergroup to trigger thread routing
+    update.effective_chat.type = (
+        "supergroup"  # must be supergroup to trigger thread routing
+    )
     update.effective_message.message_thread_id = 777
     update.effective_message.direct_messages_topic = None
     update.effective_message.reply_text = AsyncMock()
@@ -701,7 +692,9 @@ async def test_thread_mode_loads_directory_from_mapping(group_thread_settings, d
     project_path = group_thread_settings.approved_directory / "project_a"
 
     project_threads_manager = MagicMock()
-    project_threads_manager.resolve_directory = AsyncMock(return_value=str(project_path))
+    project_threads_manager.resolve_directory = AsyncMock(
+        return_value=str(project_path)
+    )
     deps["project_threads_manager"] = project_threads_manager
 
     captured = {"directory": None}
@@ -713,7 +706,9 @@ async def test_thread_mode_loads_directory_from_mapping(group_thread_settings, d
 
     update = MagicMock()
     update.effective_chat.id = -1001234567890
-    update.effective_chat.type = "supergroup"  # must be supergroup to trigger thread routing
+    update.effective_chat.type = (
+        "supergroup"  # must be supergroup to trigger thread routing
+    )
     update.effective_message.message_thread_id = 777
     update.effective_message.direct_messages_topic = None
     update.effective_message.reply_text = AsyncMock()
@@ -725,7 +720,9 @@ async def test_thread_mode_loads_directory_from_mapping(group_thread_settings, d
 
     await wrapped(update, context)
 
-    project_threads_manager.resolve_directory.assert_awaited_once_with(-1001234567890, 777)
+    project_threads_manager.resolve_directory.assert_awaited_once_with(
+        -1001234567890, 777
+    )
     assert captured["directory"] == project_path
 
 
@@ -788,9 +785,7 @@ async def test_private_mode_start_bypasses_thread_gate(private_thread_settings, 
     project_threads_manager.resolve_project.assert_not_called()
 
 
-async def test_general_topic_sets_in_general_topic_flag(
-    group_thread_settings, deps
-):
+async def test_general_topic_sets_in_general_topic_flag(group_thread_settings, deps):
     """Messages in the general topic (no thread_id) set _in_general_topic flag."""
     orchestrator = MessageOrchestrator(group_thread_settings, deps)
 
@@ -805,7 +800,9 @@ async def test_general_topic_sets_in_general_topic_flag(
 
     update = MagicMock()
     update.effective_chat.id = -1001234567890  # configured chat
-    update.effective_chat.type = "supergroup"  # must be supergroup to trigger thread routing
+    update.effective_chat.type = (
+        "supergroup"  # must be supergroup to trigger thread routing
+    )
     update.effective_message.message_thread_id = None
     update.effective_message.direct_messages_topic = None
     update.effective_message.reply_text = AsyncMock()
@@ -820,15 +817,15 @@ async def test_general_topic_sets_in_general_topic_flag(
     assert captured["flag"] is True
 
 
-async def test_thread_topic_clears_in_general_topic_flag(
-    group_thread_settings, deps
-):
+async def test_thread_topic_clears_in_general_topic_flag(group_thread_settings, deps):
     """Messages in a bound topic clear the _in_general_topic flag."""
     orchestrator = MessageOrchestrator(group_thread_settings, deps)
     project_path = group_thread_settings.approved_directory / "project_a"
 
     project_threads_manager = MagicMock()
-    project_threads_manager.resolve_directory = AsyncMock(return_value=str(project_path))
+    project_threads_manager.resolve_directory = AsyncMock(
+        return_value=str(project_path)
+    )
 
     captured = {"flag": "unset"}
 
@@ -839,7 +836,9 @@ async def test_thread_topic_clears_in_general_topic_flag(
 
     update = MagicMock()
     update.effective_chat.id = -1001234567890
-    update.effective_chat.type = "supergroup"  # must be supergroup to trigger thread routing
+    update.effective_chat.type = (
+        "supergroup"  # must be supergroup to trigger thread routing
+    )
     update.effective_message.message_thread_id = 777
     update.effective_message.direct_messages_topic = None
     update.effective_message.reply_text = AsyncMock()

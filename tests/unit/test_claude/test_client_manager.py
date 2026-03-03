@@ -64,7 +64,10 @@ class TestGetOrConnect:
                 options_builder=builder,
             )
             result = await manager.get_or_connect(
-                user_id=_UID, chat_id=_CID, message_thread_id=_TID, directory="/some/dir"
+                user_id=_UID,
+                chat_id=_CID,
+                message_thread_id=_TID,
+                directory="/some/dir",
             )
 
         assert result is mock_client
@@ -87,10 +90,16 @@ class TestGetOrConnect:
                 options_builder=builder,
             )
             first = await manager.get_or_connect(
-                user_id=_UID, chat_id=_CID, message_thread_id=_TID, directory="/some/dir"
+                user_id=_UID,
+                chat_id=_CID,
+                message_thread_id=_TID,
+                directory="/some/dir",
             )
             second = await manager.get_or_connect(
-                user_id=_UID, chat_id=_CID, message_thread_id=_TID, directory="/some/dir"
+                user_id=_UID,
+                chat_id=_CID,
+                message_thread_id=_TID,
+                directory="/some/dir",
             )
 
         assert first is second
@@ -143,7 +152,10 @@ class TestInterrupt:
                 options_builder=builder,
             )
             await manager.get_or_connect(
-                user_id=_UID, chat_id=_CID, message_thread_id=_TID, directory="/some/dir"
+                user_id=_UID,
+                chat_id=_CID,
+                message_thread_id=_TID,
+                directory="/some/dir",
             )
             await manager.interrupt(_UID, _CID, _TID)
 
@@ -173,7 +185,10 @@ class TestDisconnect:
                 options_builder=builder,
             )
             await manager.get_or_connect(
-                user_id=_UID, chat_id=_CID, message_thread_id=_TID, directory="/some/dir"
+                user_id=_UID,
+                chat_id=_CID,
+                message_thread_id=_TID,
+                directory="/some/dir",
             )
             assert (_UID, _CID, _TID) in manager._clients
 
@@ -368,7 +383,10 @@ class TestPersistence:
                 options_builder=builder,
             )
             result = await manager.get_or_connect(
-                user_id=_UID, chat_id=_CID, message_thread_id=_TID, directory="/some/dir"
+                user_id=_UID,
+                chat_id=_CID,
+                message_thread_id=_TID,
+                directory="/some/dir",
             )
 
         repo.get.assert_awaited_once_with(_CID, _TID)
@@ -426,7 +444,10 @@ class TestSetModel:
                 options_builder=builder,
             )
             await manager.get_or_connect(
-                user_id=_UID, chat_id=_CID, message_thread_id=_TID, directory="/some/dir"
+                user_id=_UID,
+                chat_id=_CID,
+                message_thread_id=_TID,
+                directory="/some/dir",
             )
             repo.upsert.reset_mock()
 
@@ -521,5 +542,7 @@ class TestGetAvailableCommands:
     def test_returns_empty_for_unknown_user(self) -> None:
         repo = _make_mock_chat_session_repo()
         manager = ClientManager(chat_session_repo=repo)
-        result = manager.get_available_commands(user_id=999, chat_id=999, message_thread_id=0)
+        result = manager.get_available_commands(
+            user_id=999, chat_id=999, message_thread_id=0
+        )
         assert result == []

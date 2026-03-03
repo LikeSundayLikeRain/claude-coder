@@ -1,8 +1,13 @@
 import json
-import pytest
 from pathlib import Path
 
-from src.claude.transcript import TranscriptEntry, format_condensed, read_full_transcript
+import pytest
+
+from src.claude.transcript import (
+    TranscriptEntry,
+    format_condensed,
+    read_full_transcript,
+)
 
 
 @pytest.fixture
@@ -12,22 +17,52 @@ def transcript_dir(tmp_path):
     slug_dir.mkdir()
     transcript = slug_dir / "sess-123.jsonl"
     lines = [
-        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "Fix the bug"}]}},
-        {"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "text", "text": "Found the issue in auth.py"},
-            {"type": "tool_use", "name": "Edit", "input": {"file_path": "src/auth.py"}},
-        ]}},
-        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "Add a test"}]}},
-        {"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "text", "text": "Added test_auth.py. All passing."},
-        ]}},
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "Fix the bug"}],
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Found the issue in auth.py"},
+                    {
+                        "type": "tool_use",
+                        "name": "Edit",
+                        "input": {"file_path": "src/auth.py"},
+                    },
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "Add a test"}],
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Added test_auth.py. All passing."},
+                ],
+            },
+        },
     ]
     transcript.write_text("\n".join(json.dumps(l) for l in lines))
     return tmp_path
 
 
 def test_read_full_transcript(transcript_dir):
-    entries = read_full_transcript("sess-123", "/tmp/myproject", projects_dir=transcript_dir)
+    entries = read_full_transcript(
+        "sess-123", "/tmp/myproject", projects_dir=transcript_dir
+    )
     assert len(entries) == 4
     assert entries[0].role == "user"
     assert entries[0].text == "Fix the bug"
@@ -39,7 +74,9 @@ def test_read_full_transcript(transcript_dir):
 
 
 def test_read_full_transcript_missing_file(tmp_path):
-    entries = read_full_transcript("nonexistent", "/tmp/myproject", projects_dir=tmp_path)
+    entries = read_full_transcript(
+        "nonexistent", "/tmp/myproject", projects_dir=tmp_path
+    )
     assert entries == []
 
 
@@ -49,20 +86,33 @@ def test_read_full_transcript_skips_thinking(transcript_dir):
     slug_dir.mkdir()
     transcript = slug_dir / "sess-456.jsonl"
     lines = [
-        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "Hello"}]}},
-        {"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "thinking", "thinking": "Let me think..."},
-            {"type": "text", "text": "Hi there!"},
-        ]}},
+        {
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Let me think..."},
+                    {"type": "text", "text": "Hi there!"},
+                ],
+            },
+        },
     ]
     transcript.write_text("\n".join(json.dumps(l) for l in lines))
-    entries = read_full_transcript("sess-456", "/tmp/thinkproject", projects_dir=transcript_dir)
+    entries = read_full_transcript(
+        "sess-456", "/tmp/thinkproject", projects_dir=transcript_dir
+    )
     assert len(entries) == 2
     assert entries[1].text == "Hi there!"
 
 
 def test_format_condensed_basic(transcript_dir):
-    entries = read_full_transcript("sess-123", "/tmp/myproject", projects_dir=transcript_dir)
+    entries = read_full_transcript(
+        "sess-123", "/tmp/myproject", projects_dir=transcript_dir
+    )
     messages = format_condensed(entries)
     assert len(messages) == 1
     assert "Fix the bug" in messages[0]
@@ -92,7 +142,9 @@ def test_format_condensed_splits_at_limit():
     entries = []
     for i in range(50):
         entries.append(TranscriptEntry(role="user", text=f"Question {i} " + "x" * 50))
-        entries.append(TranscriptEntry(role="assistant", text=f"Answer {i} " + "y" * 100))
+        entries.append(
+            TranscriptEntry(role="assistant", text=f"Answer {i} " + "y" * 100)
+        )
     messages = format_condensed(entries, max_chars=4000)
     assert len(messages) > 1
     for msg in messages:
