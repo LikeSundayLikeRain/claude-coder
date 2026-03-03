@@ -8,7 +8,6 @@ from .exceptions import (
     ClaudeSessionError,
     ClaudeTimeoutError,
 )
-from .facade import ClaudeIntegration
 from .options import OptionsBuilder
 from .sdk_integration import ClaudeResponse, ClaudeSDKManager, StreamUpdate
 from .session import SessionResolver
@@ -29,8 +28,7 @@ __all__ = [
     "ClaudeProcessError",
     "ClaudeSessionError",
     "ClaudeTimeoutError",
-    # Legacy (classic mode + event handlers)
-    "ClaudeIntegration",
+    # Legacy (event handlers)
     "ClaudeSDKManager",
     "ClaudeResponse",
     "StreamUpdate",

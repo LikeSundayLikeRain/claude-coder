@@ -21,7 +21,6 @@ def mock_settings(tmp_path: Path):
 
     settings = create_test_config(
         approved_directory=str(approved),
-        agentic_mode=True,
     )
     return settings, project_dir
 
@@ -89,7 +88,7 @@ async def test_resume_shows_picker_with_sessions(
                 with patch(
                     "src.bot.orchestrator.read_first_message", return_value=None
                 ):
-                    await orchestrator.agentic_resume(mock_update, mock_context)
+                    await orchestrator.handle_resume(mock_update, mock_context)
 
     # Verify reply was called
     mock_update.message.reply_text.assert_called_once()
@@ -132,7 +131,7 @@ async def test_resume_empty_shows_new_only(
             with patch(
                 "src.bot.orchestrator.check_history_format_health", return_value=None
             ):
-                await orchestrator.agentic_resume(mock_update, mock_context)
+                await orchestrator.handle_resume(mock_update, mock_context)
 
     mock_update.message.reply_text.assert_called_once()
     call_kwargs = mock_update.message.reply_text.call_args.kwargs
@@ -174,7 +173,7 @@ async def test_session_callback_resumes(orchestrator, mock_settings):
     }
 
     with patch("src.bot.orchestrator.read_session_transcript", return_value=[]):
-        await orchestrator._agentic_callback(update, context)
+        await orchestrator._handle_callback(update, context)
 
     # Check session_id was set
     assert context.user_data.get("claude_session_id") == "sess-abc123"
@@ -217,7 +216,7 @@ async def test_session_callback_new(orchestrator, mock_settings):
         "client_manager": mock_client_manager,
     }
 
-    await orchestrator._agentic_callback(update, context)
+    await orchestrator._handle_callback(update, context)
 
     # Check get_or_connect was called (eager connect)
     mock_client_manager.get_or_connect.assert_called_once()
@@ -246,7 +245,7 @@ async def test_resume_warns_on_malformed_history(
                 "src.bot.orchestrator.check_history_format_health",
                 return_value=warning_message,
             ):
-                await orchestrator.agentic_resume(mock_update, mock_context)
+                await orchestrator.handle_resume(mock_update, mock_context)
 
     # Should have been called twice: once for warning, once for session list
     assert mock_update.message.reply_text.call_count == 2
@@ -278,16 +277,14 @@ async def test_resume_caps_at_10_sessions(
     ]
 
     with patch("src.bot.orchestrator.read_claude_history", return_value=entries):
-        with patch(
-            "src.bot.orchestrator.filter_by_directory", return_value=entries
-        ):
+        with patch("src.bot.orchestrator.filter_by_directory", return_value=entries):
             with patch(
                 "src.bot.orchestrator.check_history_format_health", return_value=None
             ):
                 with patch(
                     "src.bot.orchestrator.read_first_message", return_value=None
                 ):
-                    await orchestrator.agentic_resume(mock_update, mock_context)
+                    await orchestrator.handle_resume(mock_update, mock_context)
 
     call_kwargs = mock_update.message.reply_text.call_args.kwargs
     reply_markup = call_kwargs["reply_markup"]
@@ -315,7 +312,7 @@ async def test_resume_falls_back_to_first_approved_dir(
             with patch(
                 "src.bot.orchestrator.check_history_format_health", return_value=None
             ):
-                await orchestrator.agentic_resume(mock_update, context)
+                await orchestrator.handle_resume(mock_update, context)
 
     # filter_by_directory should have been called with first approved directory
     mock_filter.assert_called_once()

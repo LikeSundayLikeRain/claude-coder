@@ -117,10 +117,14 @@ class TestChatSessionRepository:
         await chat_session_repo.upsert(-1001, 20, 2, "/proj/a", topic_name="A2")
         await chat_session_repo.upsert(-1001, 30, 3, "/proj/b", topic_name="B")
 
-        count_a = await chat_session_repo.count_active_by_chat_directory(-1001, "/proj/a")
+        count_a = await chat_session_repo.count_active_by_chat_directory(
+            -1001, "/proj/a"
+        )
         assert count_a == 2
 
-        count_b = await chat_session_repo.count_active_by_chat_directory(-1001, "/proj/b")
+        count_b = await chat_session_repo.count_active_by_chat_directory(
+            -1001, "/proj/b"
+        )
         assert count_b == 1
 
     async def test_list_by_user(self, chat_session_repo):

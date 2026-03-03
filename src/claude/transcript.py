@@ -188,7 +188,9 @@ def format_condensed(
     messages: List[str] = []
     current_blocks: List[str] = []
     current_len = 0
-    header_template = f"📜 Session history ({exchange_count} exchanges):\n{SEPARATOR}\n\n"
+    header_template = (
+        f"📜 Session history ({exchange_count} exchanges):\n{SEPARATOR}\n\n"
+    )
     footer = f"\n{SEPARATOR}"
 
     overhead = len(header_template) + len(footer)

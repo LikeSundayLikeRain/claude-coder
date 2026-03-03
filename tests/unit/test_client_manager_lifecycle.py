@@ -1,5 +1,6 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from src.claude.client_manager import ClientManager
@@ -28,7 +29,9 @@ async def test_on_exit_closes_topic_for_group():
     on_exit(111)
     await asyncio.sleep(0.05)
 
-    lifecycle.close_on_idle.assert_called_once_with(bot, chat_id=-1001234, message_thread_id=42)
+    lifecycle.close_on_idle.assert_called_once_with(
+        bot, chat_id=-1001234, message_thread_id=42
+    )
 
 
 @pytest.mark.asyncio

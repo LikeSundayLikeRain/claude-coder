@@ -11,7 +11,11 @@ from typing import Any, Dict, Optional
 import structlog
 from fastapi import FastAPI, Header, HTTPException, Request
 
-from ..claude.history import find_session_by_id, read_claude_history, read_session_transcript
+from ..claude.history import (
+    find_session_by_id,
+    read_claude_history,
+    read_session_transcript,
+)
 from ..config.settings import Settings
 from ..events.bus import EventBus
 from ..events.types import WebhookEvent

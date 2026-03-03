@@ -1,4 +1,5 @@
 """Tests for OptionsBuilder."""
+
 from __future__ import annotations
 
 import json
@@ -83,9 +84,7 @@ class TestOptionsBuilderCanUseTool:
     ) -> None:
         validator = MagicMock()
         builder = OptionsBuilder(security_validator=validator)
-        opts = builder.build(
-            cwd=str(tmp_path), approved_directory=str(tmp_path)
-        )
+        opts = builder.build(cwd=str(tmp_path), approved_directory=str(tmp_path))
         assert opts.can_use_tool is not None
         assert callable(opts.can_use_tool)
 
@@ -94,9 +93,7 @@ class TestOptionsBuilderCanUseTool:
         opts = builder.build(cwd=str(tmp_path))
         assert opts.can_use_tool is None
 
-    def test_can_use_tool_none_when_no_approved_directory(
-        self, tmp_path: Path
-    ) -> None:
+    def test_can_use_tool_none_when_no_approved_directory(self, tmp_path: Path) -> None:
         validator = MagicMock()
         builder = OptionsBuilder(security_validator=validator)
         opts = builder.build(cwd=str(tmp_path))

@@ -158,9 +158,7 @@ class TestGetOrConnect:
         client_b = make_mock_client("session-b")
         clients = [client_a, client_b]
 
-        with patch(
-            "src.claude.client_manager.UserClient", side_effect=clients
-        ):
+        with patch("src.claude.client_manager.UserClient", side_effect=clients):
             result_a = await manager.get_or_connect(
                 user_id=1, chat_id=100, message_thread_id=1, directory="/a"
             )

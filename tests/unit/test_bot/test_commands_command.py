@@ -16,7 +16,6 @@ def mock_settings():
     settings = MagicMock(spec=Settings)
     settings.approved_directories = [Path("/test/workspace")]
     settings.approved_directory = Path("/test/workspace")
-    settings.agentic_mode = True
     return settings
 
 
@@ -46,18 +45,23 @@ def mock_context():
 
 # --- /commands tests ---
 
+
 @pytest.mark.asyncio
 async def test_commands_shows_cached_commands(orchestrator, mock_update, mock_context):
     """Test /commands uses cached commands from get_server_info()."""
     mock_client_manager = MagicMock()
     mock_client_manager.get_available_commands.return_value = [
-        {"name": "brainstorm", "description": "Brainstorm ideas", "argumentHint": "<topic>"},
+        {
+            "name": "brainstorm",
+            "description": "Brainstorm ideas",
+            "argumentHint": "<topic>",
+        },
         {"name": "commit", "description": "Commit changes", "argumentHint": ""},
         {"name": "deploy", "description": "Deploy app", "argumentHint": ""},
     ]
     mock_context.bot_data = {"client_manager": mock_client_manager}
 
-    await orchestrator.agentic_commands(mock_update, mock_context)
+    await orchestrator.handle_commands(mock_update, mock_context)
 
     mock_update.message.reply_text.assert_called_once()
     call_args = mock_update.message.reply_text.call_args
@@ -78,7 +82,7 @@ async def test_commands_no_active_session(orchestrator, mock_update, mock_contex
     mock_client_manager.get_available_commands.return_value = []
     mock_context.bot_data = {"client_manager": mock_client_manager}
 
-    await orchestrator.agentic_commands(mock_update, mock_context)
+    await orchestrator.handle_commands(mock_update, mock_context)
 
     mock_update.message.reply_text.assert_called_once()
     message_text = mock_update.message.reply_text.call_args[0][0]
@@ -86,7 +90,9 @@ async def test_commands_no_active_session(orchestrator, mock_update, mock_contex
 
 
 @pytest.mark.asyncio
-async def test_commands_arg_hint_uses_switch_inline(orchestrator, mock_update, mock_context):
+async def test_commands_arg_hint_uses_switch_inline(
+    orchestrator, mock_update, mock_context
+):
     """Test skills with argumentHint use switch_inline_query_current_chat."""
     mock_client_manager = MagicMock()
     mock_client_manager.get_available_commands.return_value = [
@@ -94,7 +100,7 @@ async def test_commands_arg_hint_uses_switch_inline(orchestrator, mock_update, m
     ]
     mock_context.bot_data = {"client_manager": mock_client_manager}
 
-    await orchestrator.agentic_commands(mock_update, mock_context)
+    await orchestrator.handle_commands(mock_update, mock_context)
 
     reply_markup = mock_update.message.reply_text.call_args[1]["reply_markup"]
     button = reply_markup.inline_keyboard[0][0]
@@ -102,7 +108,9 @@ async def test_commands_arg_hint_uses_switch_inline(orchestrator, mock_update, m
 
 
 @pytest.mark.asyncio
-async def test_commands_no_arg_hint_uses_callback(orchestrator, mock_update, mock_context):
+async def test_commands_no_arg_hint_uses_callback(
+    orchestrator, mock_update, mock_context
+):
     """Test skills without argumentHint use callback_data."""
     mock_client_manager = MagicMock()
     mock_client_manager.get_available_commands.return_value = [
@@ -110,7 +118,7 @@ async def test_commands_no_arg_hint_uses_callback(orchestrator, mock_update, moc
     ]
     mock_context.bot_data = {"client_manager": mock_client_manager}
 
-    await orchestrator.agentic_commands(mock_update, mock_context)
+    await orchestrator.handle_commands(mock_update, mock_context)
 
     reply_markup = mock_update.message.reply_text.call_args[1]["reply_markup"]
     button = reply_markup.inline_keyboard[0][0]
@@ -118,6 +126,7 @@ async def test_commands_no_arg_hint_uses_callback(orchestrator, mock_update, moc
 
 
 # --- Skill text invocation tests ---
+
 
 @pytest.mark.asyncio
 async def test_skill_text_passthrough(orchestrator, mock_update, mock_context):
@@ -157,7 +166,7 @@ async def test_skill_text_passthrough(orchestrator, mock_update, mock_context):
             )
             with patch.object(orchestrator, "_run_claude_query") as mock_query:
                 mock_query.return_value = mock_claude_response
-                await orchestrator.agentic_text(mock_update, mock_context)
+                await orchestrator.handle_text(mock_update, mock_context)
 
     # Verify prompt is passed verbatim — no <skill-invocation> wrapping
     mock_query.assert_called_once()
@@ -184,7 +193,7 @@ async def test_unknown_skill_shows_error(orchestrator, mock_update, mock_context
         "claude_session_id": "sess",
     }
 
-    await orchestrator.agentic_text(mock_update, mock_context)
+    await orchestrator.handle_text(mock_update, mock_context)
 
     mock_update.message.reply_text.assert_called()
     message_text = mock_update.message.reply_text.call_args[0][0]
@@ -192,6 +201,7 @@ async def test_unknown_skill_shows_error(orchestrator, mock_update, mock_context
 
 
 # --- Skill callback tests ---
+
 
 @pytest.mark.asyncio
 async def test_skill_callback_passthrough(orchestrator, mock_context):
@@ -232,10 +242,12 @@ async def test_skill_callback_passthrough(orchestrator, mock_context):
             )
             with patch.object(orchestrator, "_run_claude_query") as mock_run:
                 mock_run.return_value = mock_claude_response
-                await orchestrator._agentic_callback(mock_update, mock_context)
+                await orchestrator._handle_callback(mock_update, mock_context)
 
     # Verify prompt passed verbatim as /skill_name
     mock_run.assert_called_once()
-    prompt = mock_run.call_args.kwargs.get("prompt", mock_run.call_args[0][0] if mock_run.call_args[0] else "")
+    prompt = mock_run.call_args.kwargs.get(
+        "prompt", mock_run.call_args[0][0] if mock_run.call_args[0] else ""
+    )
     assert prompt == "/deploy"
     assert "<skill-invocation>" not in prompt

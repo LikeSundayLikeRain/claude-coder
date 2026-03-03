@@ -57,7 +57,9 @@ class ClientManager:
                     loop = asyncio.get_event_loop()
                     loop.create_task(
                         self._lifecycle_manager.close_on_idle(
-                            self._bot, chat_id=chat_id, message_thread_id=message_thread_id
+                            self._bot,
+                            chat_id=chat_id,
+                            message_thread_id=message_thread_id,
                         )
                     )
                 except RuntimeError:

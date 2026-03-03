@@ -1,6 +1,6 @@
 """Event handlers that bridge the event bus to Claude and Telegram.
 
-AgentHandler: translates events into ClaudeIntegration.run_command() calls.
+AgentHandler: translates events into ClaudeSDKManager.execute_command() calls.
 NotificationHandler: subscribes to AgentResponseEvent and delivers to Telegram.
 """
 
@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 
 import structlog
 
-from ..claude.facade import ClaudeIntegration
+from ..claude.sdk_integration import ClaudeSDKManager
 from .bus import Event, EventBus
 from .types import AgentResponseEvent, ScheduledEvent, WebhookEvent
 
@@ -20,19 +20,19 @@ class AgentHandler:
     """Translates incoming events into Claude agent executions.
 
     Webhook and scheduled events are converted into prompts and sent
-    to ClaudeIntegration.run_command(). The response is published
+    to ClaudeSDKManager.execute_command(). The response is published
     back as an AgentResponseEvent for delivery.
     """
 
     def __init__(
         self,
         event_bus: EventBus,
-        claude_integration: ClaudeIntegration,
+        sdk_manager: ClaudeSDKManager,
         default_working_directory: Path,
         default_user_id: int = 0,
     ) -> None:
         self.event_bus = event_bus
-        self.claude = claude_integration
+        self.sdk_manager = sdk_manager
         self.default_working_directory = default_working_directory
         self.default_user_id = default_user_id
 
@@ -56,10 +56,9 @@ class AgentHandler:
         prompt = self._build_webhook_prompt(event)
 
         try:
-            response = await self.claude.run_command(
+            response = await self.sdk_manager.execute_command(
                 prompt=prompt,
                 working_directory=self.default_working_directory,
-                user_id=self.default_user_id,
             )
 
             if response.content:
@@ -101,10 +100,9 @@ class AgentHandler:
         working_dir = event.working_directory or self.default_working_directory
 
         try:
-            response = await self.claude.run_command(
+            response = await self.sdk_manager.execute_command(
                 prompt=prompt,
                 working_directory=working_dir,
-                user_id=self.default_user_id,
             )
 
             if response.content:

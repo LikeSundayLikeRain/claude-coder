@@ -41,13 +41,9 @@ class StreamHandler:
         elif class_name == "StreamEvent":
             return self._handle_partial(message)
         elif class_name == "UserMessage":
-            return StreamEvent(
-                type="user", content=getattr(message, "content", "")
-            )
+            return StreamEvent(type="user", content=getattr(message, "content", ""))
         else:
-            logger.debug(
-                "stream_handler.unknown_message_type", class_name=class_name
-            )
+            logger.debug("stream_handler.unknown_message_type", class_name=class_name)
             return StreamEvent(type="unknown")
 
     def _handle_result(self, message: Any) -> StreamEvent:
@@ -116,13 +112,9 @@ class StreamHandler:
             delta = event.get("delta", {})
             delta_type = delta.get("type", "")
             if delta_type == "text_delta":
-                return StreamEvent(
-                    type="text", content=delta.get("text", "")
-                )
+                return StreamEvent(type="text", content=delta.get("text", ""))
             elif delta_type == "thinking_delta":
-                return StreamEvent(
-                    type="thinking", content=delta.get("thinking", "")
-                )
+                return StreamEvent(type="thinking", content=delta.get("thinking", ""))
             elif delta_type == "input_json_delta":
                 # Tool input streaming — skip, we get the full input later
                 return StreamEvent(type="unknown")

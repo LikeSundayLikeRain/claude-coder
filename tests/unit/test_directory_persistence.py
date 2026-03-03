@@ -1,10 +1,20 @@
 """Tests for multi-root directory support and directory persistence."""
 
+import sys
 import tempfile
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+# handlers.message was removed in the classic-mode cleanup.
+# Stub it so the lazy import inside _execute_query doesn't fail.
+if "src.bot.handlers.message" not in sys.modules:
+    _stub = ModuleType("src.bot.handlers.message")
+    _stub._format_error_message = lambda response, default="": default  # type: ignore[attr-defined]
+    _stub._update_working_directory_from_claude_response = lambda *a, **kw: None  # type: ignore[attr-defined]
+    sys.modules["src.bot.handlers.message"] = _stub
 
 from src.bot.orchestrator import MessageOrchestrator
 from src.config import create_test_config
@@ -67,11 +77,13 @@ def mock_deps(mock_storage):
     """Mock dependencies for orchestrator."""
     claude_integration = MagicMock()
     claude_integration._find_resumable_session_id = MagicMock(return_value=None)
-    claude_integration.run_command = AsyncMock(return_value=MagicMock(
-        response="Test response",
-        session_id="test-session-123",
-        error=None,
-    ))
+    claude_integration.run_command = AsyncMock(
+        return_value=MagicMock(
+            response="Test response",
+            session_id="test-session-123",
+            error=None,
+        )
+    )
 
     audit_logger = MagicMock()
     audit_logger.log_command = AsyncMock()
@@ -109,14 +121,13 @@ class TestMultiRootDirectorySupport:
         """Single APPROVED_DIRECTORY should work as before."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
-            agentic_mode=True,
         )
 
         update, context = mock_update_and_context
         context.bot_data = mock_deps
 
         orchestrator = MessageOrchestrator(settings, mock_deps)
-        await orchestrator.agentic_repo(update, context)
+        await orchestrator.handle_repo(update, context)
 
         # Should list subdirectories
         update.message.reply_text.assert_called_once()
@@ -137,20 +148,21 @@ class TestMultiRootDirectorySupport:
 
         # Set environment variable for multi-root config
         old_env = os.environ.get("APPROVED_DIRECTORIES")
-        os.environ["APPROVED_DIRECTORIES"] = f"{multi_root_tmpdir['root1']},{multi_root_tmpdir['root2']}"
+        os.environ["APPROVED_DIRECTORIES"] = (
+            f"{multi_root_tmpdir['root1']},{multi_root_tmpdir['root2']}"
+        )
 
         try:
             settings = create_test_config(
                 approved_directory=str(multi_root_tmpdir["root1"]),
                 approved_directories_str=f"{multi_root_tmpdir['root1']},{multi_root_tmpdir['root2']}",
-                agentic_mode=True,
             )
 
             update, context = mock_update_and_context
             context.bot_data = mock_deps
 
             orchestrator = MessageOrchestrator(settings, mock_deps)
-            await orchestrator.agentic_repo(update, context)
+            await orchestrator.handle_repo(update, context)
 
             # New browser shows one root at a time (first root by default)
             update.message.reply_text.assert_called_once()
@@ -181,13 +193,14 @@ class TestMultiRootDirectorySupport:
         import os
 
         old_env = os.environ.get("APPROVED_DIRECTORIES")
-        os.environ["APPROVED_DIRECTORIES"] = f"{multi_root_tmpdir['root1']},{multi_root_tmpdir['root2']}"
+        os.environ["APPROVED_DIRECTORIES"] = (
+            f"{multi_root_tmpdir['root1']},{multi_root_tmpdir['root2']}"
+        )
 
         try:
             settings = create_test_config(
                 approved_directory=str(multi_root_tmpdir["root1"]),
                 approved_directories_str=f"{multi_root_tmpdir['root1']},{multi_root_tmpdir['root2']}",
-                agentic_mode=True,
             )
 
             update, context = mock_update_and_context
@@ -195,13 +208,19 @@ class TestMultiRootDirectorySupport:
             context.bot_data = mock_deps
 
             orchestrator = MessageOrchestrator(settings, mock_deps)
-            await orchestrator.agentic_repo(update, context)
+            await orchestrator.handle_repo(update, context)
 
             # Should switch to project_c in root2
-            assert context.user_data["current_directory"] == multi_root_tmpdir["root2"] / "project_c"
+            assert (
+                context.user_data["current_directory"]
+                == multi_root_tmpdir["root2"] / "project_c"
+            )
 
             # Should switch to project_c in root2
-            assert context.user_data["current_directory"] == multi_root_tmpdir["root2"] / "project_c"
+            assert (
+                context.user_data["current_directory"]
+                == multi_root_tmpdir["root2"] / "project_c"
+            )
         finally:
             if old_env is not None:
                 os.environ["APPROVED_DIRECTORIES"] = old_env
@@ -219,7 +238,6 @@ class TestDirectoryPersistence:
         """Switching directory updates current_directory in user_data."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
-            agentic_mode=True,
         )
 
         update, context = mock_update_and_context
@@ -227,10 +245,12 @@ class TestDirectoryPersistence:
         context.bot_data = mock_deps
 
         orchestrator = MessageOrchestrator(settings, mock_deps)
-        await orchestrator.agentic_repo(update, context)
+        await orchestrator.handle_repo(update, context)
 
         # Directory should be updated in user_data
-        assert context.user_data["current_directory"] == single_root_tmpdir / "project_a"
+        assert (
+            context.user_data["current_directory"] == single_root_tmpdir / "project_a"
+        )
 
     @pytest.mark.asyncio
     async def test_restore_session_on_first_message(
@@ -239,7 +259,6 @@ class TestDirectoryPersistence:
         """First message should restore persisted session for the current chat/thread."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
-            agentic_mode=True,
         )
 
         # Mock persisted session for the current chat/thread
@@ -256,7 +275,7 @@ class TestDirectoryPersistence:
         context.user_data["current_directory"] = persisted_path
 
         orchestrator = MessageOrchestrator(settings, mock_deps)
-        await orchestrator.agentic_text(update, context)
+        await orchestrator.handle_text(update, context)
 
         # load_session was called for cold-start detection
         mock_deps["storage"].load_session.assert_called_once()
@@ -270,7 +289,6 @@ class TestDirectoryPersistence:
         """Agentic text handler works even without current_directory set."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
-            agentic_mode=True,
         )
 
         update, context = mock_update_and_context
@@ -280,7 +298,7 @@ class TestDirectoryPersistence:
         # No current_directory set — should default to approved_directory
 
         orchestrator = MessageOrchestrator(settings, mock_deps)
-        await orchestrator.agentic_text(update, context)
+        await orchestrator.handle_text(update, context)
 
         # Should NOT have set an unsafe directory
         current_dir = context.user_data.get("current_directory")
@@ -298,7 +316,6 @@ class TestDirectoryPersistence:
         """Callback handler cd: updates current_directory."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
-            agentic_mode=True,
         )
 
         # Mock callback query
@@ -313,10 +330,13 @@ class TestDirectoryPersistence:
         context.bot_data = mock_deps
 
         orchestrator = MessageOrchestrator(settings, mock_deps)
-        await orchestrator._agentic_callback(update, context)
+        await orchestrator._handle_callback(update, context)
 
         # Directory should be updated in user_data
-        assert context.user_data.get("current_directory") == single_root_tmpdir / "project_a"
+        assert (
+            context.user_data.get("current_directory")
+            == single_root_tmpdir / "project_a"
+        )
 
 
 class TestSelectDirectoryPureSwitch:
@@ -329,7 +349,6 @@ class TestSelectDirectoryPureSwitch:
         """_select_directory should NOT look up or set claude_session_id from history."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
-            agentic_mode=True,
         )
 
         update, context = mock_update_and_context
@@ -337,7 +356,7 @@ class TestSelectDirectoryPureSwitch:
         context.bot_data = mock_deps
 
         orchestrator = MessageOrchestrator(settings, mock_deps)
-        await orchestrator.agentic_repo(update, context)
+        await orchestrator.handle_repo(update, context)
 
         # session_id must be explicitly None — no auto-resume
         assert context.user_data["claude_session_id"] is None
@@ -349,7 +368,6 @@ class TestSelectDirectoryPureSwitch:
         """_select_directory should reset force_new_session to False."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
-            agentic_mode=True,
         )
 
         update, context = mock_update_and_context
@@ -358,7 +376,7 @@ class TestSelectDirectoryPureSwitch:
         context.user_data["force_new_session"] = True  # pre-set
 
         orchestrator = MessageOrchestrator(settings, mock_deps)
-        await orchestrator.agentic_repo(update, context)
+        await orchestrator.handle_repo(update, context)
 
         assert context.user_data["force_new_session"] is False
 
@@ -369,7 +387,6 @@ class TestSelectDirectoryPureSwitch:
         """_select_directory disconnects any active SDK client."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
-            agentic_mode=True,
         )
 
         client_manager = MagicMock()
@@ -382,7 +399,7 @@ class TestSelectDirectoryPureSwitch:
         context.bot_data = mock_deps_with_cm
 
         orchestrator = MessageOrchestrator(settings, mock_deps_with_cm)
-        await orchestrator.agentic_repo(update, context)
+        await orchestrator.handle_repo(update, context)
 
         # disconnect should be called with user id and old directory
         assert client_manager.disconnect.called
@@ -396,7 +413,6 @@ class TestSelectDirectoryPureSwitch:
         """Reply text should not contain 'session resumed' after switching."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
-            agentic_mode=True,
         )
 
         update, context = mock_update_and_context
@@ -404,7 +420,7 @@ class TestSelectDirectoryPureSwitch:
         context.bot_data = mock_deps
 
         orchestrator = MessageOrchestrator(settings, mock_deps)
-        await orchestrator.agentic_repo(update, context)
+        await orchestrator.handle_repo(update, context)
 
         call_args = update.message.reply_text.call_args
         reply_text = call_args[0][0]
@@ -415,11 +431,12 @@ class TestBackwardCompatibility:
     """Test backward compatibility with single approved_directory."""
 
     @pytest.mark.asyncio
-    async def test_settings_approved_directories_property_single(self, single_root_tmpdir):
+    async def test_settings_approved_directories_property_single(
+        self, single_root_tmpdir
+    ):
         """approved_directories property returns list with single directory."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
-            agentic_mode=True,
         )
 
         dirs = settings.approved_directories
@@ -428,18 +445,21 @@ class TestBackwardCompatibility:
         assert dirs[0] == single_root_tmpdir
 
     @pytest.mark.asyncio
-    async def test_settings_approved_directories_property_multi(self, multi_root_tmpdir):
+    async def test_settings_approved_directories_property_multi(
+        self, multi_root_tmpdir
+    ):
         """approved_directories property returns list with multiple directories."""
         import os
 
         old_env = os.environ.get("APPROVED_DIRECTORIES")
-        os.environ["APPROVED_DIRECTORIES"] = f"{multi_root_tmpdir['root1']},{multi_root_tmpdir['root2']}"
+        os.environ["APPROVED_DIRECTORIES"] = (
+            f"{multi_root_tmpdir['root1']},{multi_root_tmpdir['root2']}"
+        )
 
         try:
             settings = create_test_config(
                 approved_directory=str(multi_root_tmpdir["root1"]),
                 approved_directories_str=f"{multi_root_tmpdir['root1']},{multi_root_tmpdir['root2']}",
-                agentic_mode=True,
             )
 
             dirs = settings.approved_directories
@@ -464,7 +484,6 @@ class TestColdStartRestoration:
         """After bot restart, session_id is restored from DB via load_session(chat_id, thread_id)."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
-            agentic_mode=True,
         )
 
         persisted_dir = single_root_tmpdir / "project_a"
@@ -480,7 +499,7 @@ class TestColdStartRestoration:
         context.user_data = {"current_directory": persisted_dir}
 
         orchestrator = MessageOrchestrator(settings, mock_deps)
-        await orchestrator.agentic_text(update, context)
+        await orchestrator.handle_text(update, context)
 
         # load_session was called (cold-start detection triggered)
         mock_deps["storage"].load_session.assert_called_once()
@@ -494,7 +513,6 @@ class TestColdStartRestoration:
         """After /new or /repo, session_id key exists as None — no DB restore."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
-            agentic_mode=True,
         )
 
         mock_deps["storage"].load_session = AsyncMock(return_value=None)
@@ -507,7 +525,7 @@ class TestColdStartRestoration:
         context.user_data = {"claude_session_id": None}
 
         orchestrator = MessageOrchestrator(settings, mock_deps)
-        await orchestrator.agentic_text(update, context)
+        await orchestrator.handle_text(update, context)
 
         # Should NOT call load_session (key already present as None)
         mock_deps["storage"].load_session.assert_not_called()

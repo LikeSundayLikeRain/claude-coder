@@ -20,9 +20,7 @@ def workspace(tmp_path):
 
 @pytest.fixture
 def settings(workspace):
-    return create_test_config(
-        approved_directory=str(workspace), agentic_mode=True
-    )
+    return create_test_config(approved_directory=str(workspace))
 
 
 @pytest.fixture
@@ -67,7 +65,7 @@ async def test_old_cd_callback_still_switches_directory(orchestrator, workspace)
         },
     )
 
-    await orchestrator._agentic_callback(update, ctx)
+    await orchestrator._handle_callback(update, ctx)
 
     assert ctx.user_data["current_directory"] == workspace / "projectB"
     # Session should be cleared (no auto-resume)
@@ -97,7 +95,7 @@ async def test_old_cd_callback_not_found(orchestrator, workspace):
         bot_data={"storage": MagicMock()},
     )
 
-    await orchestrator._agentic_callback(update, ctx)
+    await orchestrator._handle_callback(update, ctx)
 
     query.edit_message_text.assert_called_once()
     text = query.edit_message_text.call_args[0][0]
@@ -120,7 +118,7 @@ async def test_old_cd_callback_outside_roots_rejected(orchestrator, workspace):
         bot_data={"storage": MagicMock()},
     )
 
-    await orchestrator._agentic_callback(update, ctx)
+    await orchestrator._handle_callback(update, ctx)
 
     query.edit_message_text.assert_called_once()
     text = query.edit_message_text.call_args[0][0]

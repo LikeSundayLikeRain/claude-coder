@@ -1,12 +1,22 @@
 """Tests for /compact command."""
 
+import sys
 import tempfile
 from pathlib import Path
-import pytest
+from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock
 
-from telegram import Update, User, Message, Chat
+import pytest
+from telegram import Chat, Message, Update, User
 from telegram.ext import ContextTypes
+
+# handlers.message was removed in the classic-mode cleanup.
+# Stub it so the lazy import inside _execute_query doesn't fail.
+if "src.bot.handlers.message" not in sys.modules:
+    _stub = ModuleType("src.bot.handlers.message")
+    _stub._format_error_message = lambda response, default="": default  # type: ignore[attr-defined]
+    _stub._update_working_directory_from_claude_response = lambda *a, **kw: None  # type: ignore[attr-defined]
+    sys.modules["src.bot.handlers.message"] = _stub
 
 from src.bot.orchestrator import MessageOrchestrator
 from src.claude.sdk_integration import ClaudeResponse
@@ -32,6 +42,21 @@ def mock_update():
     return update
 
 
+def _make_client_manager(*submit_results: MagicMock) -> MagicMock:
+    """Build a ClientManager mock that returns submit_results in sequence."""
+    client = AsyncMock()
+    client.submit = AsyncMock(side_effect=list(submit_results))
+    client.session_id = None
+    client.is_connected = False
+
+    cm = AsyncMock()
+    cm.get_or_connect = AsyncMock(return_value=client)
+    cm.get_active_client = MagicMock(return_value=None)
+    cm.update_session_id = AsyncMock()
+    cm._client = client  # expose for assertions
+    return cm
+
+
 @pytest.fixture
 def mock_context():
     """Create a mock context."""
@@ -49,7 +74,6 @@ def orchestrator(tmp_dir):
     """Create orchestrator with test settings."""
     settings = create_test_config(
         approved_directory=str(tmp_dir),
-        agentic_mode=True,
     )
     deps = {
         "claude_integration": MagicMock(),
@@ -71,7 +95,7 @@ class TestCompactCommand:
         # No session_id in context
         mock_context.user_data = {}
 
-        await orchestrator.agentic_compact(mock_update, mock_context)
+        await orchestrator.handle_compact(mock_update, mock_context)
 
         mock_update.message.reply_text.assert_called_once_with(
             "No active session to compact. Start a conversation first."
@@ -88,47 +112,28 @@ class TestCompactCommand:
             "current_directory": "/tmp/test",
         }
 
-        # Mock claude_integration
-        claude_integration = mock_context.bot_data["claude_integration"]
+        # Build submit results for the two _run_claude_query calls
+        summary_result = MagicMock()
+        summary_result.response_text = "• Decision: Use FastAPI\n• State: API endpoints working\n• Pending: Add tests"
+        summary_result.session_id = "old-session-123"
+        summary_result.cost = None
+        summary_result.duration_ms = None
+        summary_result.num_turns = 1
 
-        # First call returns summary
-        summary_response = ClaudeResponse(
-            content="• Decision: Use FastAPI\n• State: API endpoints working\n• Pending: Add tests",
-            session_id="old-session-123",
-            cost=0.05,
-            num_turns=1,
-            duration_ms=1500,
-        )
+        ack_result = MagicMock()
+        ack_result.response_text = "Got it. Continuing from where we left off."
+        ack_result.session_id = "new-session-456"
+        ack_result.cost = None
+        ack_result.duration_ms = None
+        ack_result.num_turns = 1
 
-        # Second call returns acknowledgment with new session
-        ack_response = ClaudeResponse(
-            content="Got it. Continuing from where we left off.",
-            session_id="new-session-456",
-            cost=0.02,
-            num_turns=1,
-            duration_ms=800,
-        )
+        cm = _make_client_manager(summary_result, ack_result)
+        mock_context.bot_data["client_manager"] = cm
 
-        claude_integration.run_command = AsyncMock(
-            side_effect=[summary_response, ack_response]
-        )
+        await orchestrator.handle_compact(mock_update, mock_context)
 
-        await orchestrator.agentic_compact(mock_update, mock_context)
-
-        # Verify two run_command calls
-        assert claude_integration.run_command.call_count == 2
-
-        # First call: summarize with existing session
-        first_call = claude_integration.run_command.call_args_list[0]
-        assert "Summarize our conversation" in first_call[1]["prompt"]
-        assert first_call[1]["session_id"] == "old-session-123"
-        assert first_call[1]["force_new"] is False
-
-        # Second call: reseed with new session
-        second_call = claude_integration.run_command.call_args_list[1]
-        assert "This is a compacted session" in second_call[1]["prompt"]
-        assert "Decision: Use FastAPI" in second_call[1]["prompt"]
-        assert second_call[1]["force_new"] is True
+        # Verify two submit calls (summary + reseed)
+        assert cm._client.submit.call_count == 2
 
         # Session ID updated to new session
         assert mock_context.user_data["claude_session_id"] == "new-session-456"
@@ -155,7 +160,7 @@ class TestCompactCommand:
             side_effect=Exception("Claude API error")
         )
 
-        await orchestrator.agentic_compact(mock_update, mock_context)
+        await orchestrator.handle_compact(mock_update, mock_context)
 
         # Error message sent
         calls = [str(call) for call in mock_update.message.reply_text.call_args_list]
@@ -173,16 +178,22 @@ class TestCompactCommand:
             "current_directory": "/tmp/test",
         }
 
-        # Mock claude_integration to fail on first call only
-        claude_integration = mock_context.bot_data["claude_integration"]
-        claude_integration.run_command = AsyncMock(
-            side_effect=Exception("Network timeout")
-        )
+        # Build client_manager whose submit raises on first call
+        client = AsyncMock()
+        client.submit = AsyncMock(side_effect=Exception("Network timeout"))
+        client.session_id = None
+        client.is_connected = False
 
-        await orchestrator.agentic_compact(mock_update, mock_context)
+        cm = AsyncMock()
+        cm.get_or_connect = AsyncMock(return_value=client)
+        cm.get_active_client = MagicMock(return_value=None)
+        cm.update_session_id = AsyncMock()
+        mock_context.bot_data["client_manager"] = cm
 
-        # Only one call attempted (failed during summary)
-        assert claude_integration.run_command.call_count == 1
+        await orchestrator.handle_compact(mock_update, mock_context)
+
+        # Only one submit attempted (failed during summary)
+        assert client.submit.call_count == 1
 
         # Error message sent
         calls = [str(call) for call in mock_update.message.reply_text.call_args_list]

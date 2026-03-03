@@ -213,8 +213,12 @@ class TestFindSessionById:
 
     def test_finds_existing_session(self) -> None:
         entries = [
-            HistoryEntry(session_id="aaa", display="first", timestamp=1000, project="/proj/a"),
-            HistoryEntry(session_id="bbb", display="second", timestamp=2000, project="/proj/b"),
+            HistoryEntry(
+                session_id="aaa", display="first", timestamp=1000, project="/proj/a"
+            ),
+            HistoryEntry(
+                session_id="bbb", display="second", timestamp=2000, project="/proj/b"
+            ),
         ]
         result = find_session_by_id(entries, "bbb")
         assert result is not None
@@ -223,7 +227,9 @@ class TestFindSessionById:
 
     def test_returns_none_for_missing(self) -> None:
         entries = [
-            HistoryEntry(session_id="aaa", display="first", timestamp=1000, project="/proj/a"),
+            HistoryEntry(
+                session_id="aaa", display="first", timestamp=1000, project="/proj/a"
+            ),
         ]
         result = find_session_by_id(entries, "zzz")
         assert result is None
@@ -305,22 +311,30 @@ class TestReadSessionTranscript:
 
         transcript = slug_dir / "session-123.jsonl"
         lines = [
-            json.dumps({"type": "user", "message": {"role": "user", "content": "Hello"}}),
-            json.dumps({
-                "type": "assistant",
-                "message": {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": "Hi there!"}],
-                },
-            }),
-            json.dumps({"type": "user", "message": {"role": "user", "content": "How are you?"}}),
-            json.dumps({
-                "type": "assistant",
-                "message": {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": "I'm doing well!"}],
-                },
-            }),
+            json.dumps(
+                {"type": "user", "message": {"role": "user", "content": "Hello"}}
+            ),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "Hi there!"}],
+                    },
+                }
+            ),
+            json.dumps(
+                {"type": "user", "message": {"role": "user", "content": "How are you?"}}
+            ),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "I'm doing well!"}],
+                    },
+                }
+            ),
         ]
         transcript.write_text("\n".join(lines) + "\n")
 
@@ -345,8 +359,15 @@ class TestReadSessionTranscript:
 
         transcript = slug_dir / "session-456.jsonl"
         lines = [
-            json.dumps({"type": "user", "message": {"role": "user", "content": "<system>ignore</system>"}}),
-            json.dumps({"type": "user", "message": {"role": "user", "content": "Real message"}}),
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": "<system>ignore</system>"},
+                }
+            ),
+            json.dumps(
+                {"type": "user", "message": {"role": "user", "content": "Real message"}}
+            ),
             json.dumps({"type": "progress", "data": "something"}),
         ]
         transcript.write_text("\n".join(lines) + "\n")
@@ -370,10 +391,14 @@ class TestReadSessionTranscript:
         transcript = slug_dir / "session-789.jsonl"
         lines = []
         for i in range(10):
-            lines.append(json.dumps({
-                "type": "user",
-                "message": {"role": "user", "content": f"Message {i}"},
-            }))
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {"role": "user", "content": f"Message {i}"},
+                    }
+                )
+            )
         transcript.write_text("\n".join(lines) + "\n")
 
         msgs = read_session_transcript(

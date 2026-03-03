@@ -11,7 +11,11 @@ import asyncio
 from typing import Any, Callable, Dict, Optional
 
 import structlog
-from telegram import BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, Update
+from telegram import (
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    Update,
+)
 from telegram.ext import (
     AIORateLimiter,
     Application,

@@ -1,4 +1,5 @@
 """Builds ClaudeAgentOptions from CLI settings with full feature parity."""
+
 from __future__ import annotations
 
 import json

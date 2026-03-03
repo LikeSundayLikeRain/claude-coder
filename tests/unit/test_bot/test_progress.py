@@ -15,7 +15,6 @@ from src.bot.progress import (
     tool_icon,
 )
 
-
 # ---------------------------------------------------------------------------
 # Task 1: ActivityEntry
 # ---------------------------------------------------------------------------
@@ -101,7 +100,9 @@ class TestProgressMessageManagerRender:
         """Text entries are rendered as narrative in the progress display."""
         msg = AsyncMock()
         pm = ProgressMessageManager(initial_message=msg, start_time=0.0)
-        pm.activity_log.append(ActivityEntry(kind="text", content="Let me check that file."))
+        pm.activity_log.append(
+            ActivityEntry(kind="text", content="Let me check that file.")
+        )
         text = pm.render()
         assert "\U0001f4ac Let me check that file." in text
 
@@ -118,7 +119,9 @@ class TestProgressMessageManagerRender:
     def test_tool_entry_with_detail(self) -> None:
         msg = AsyncMock()
         pm = ProgressMessageManager(initial_message=msg, start_time=0.0)
-        pm.activity_log.append(ActivityEntry(kind="tool", tool_name="Read", tool_detail="foo.py"))
+        pm.activity_log.append(
+            ActivityEntry(kind="tool", tool_name="Read", tool_detail="foo.py")
+        )
         text = pm.render()
         assert "Read" in text
         assert "foo.py" in text
@@ -127,7 +130,9 @@ class TestProgressMessageManagerRender:
         msg = AsyncMock()
         pm = ProgressMessageManager(initial_message=msg, start_time=0.0)
         pm.activity_log.append(
-            ActivityEntry(kind="tool", tool_name="Bash", tool_detail="git status", is_running=True)
+            ActivityEntry(
+                kind="tool", tool_name="Bash", tool_detail="git status", is_running=True
+            )
         )
         text = pm.render()
         assert "\u23f3" in text
@@ -149,7 +154,9 @@ class TestProgressMessageManagerRender:
     def test_thinking_indicator(self) -> None:
         msg = AsyncMock()
         pm = ProgressMessageManager(initial_message=msg, start_time=0.0)
-        pm.activity_log.append(ActivityEntry(kind="thinking", content="Thinking", is_running=True))
+        pm.activity_log.append(
+            ActivityEntry(kind="thinking", content="Thinking", is_running=True)
+        )
         text = pm.render()
         assert "Thinking" in text
 
@@ -178,7 +185,9 @@ class TestProgressMessageManagerFinalize:
     def test_finalize_removes_spinner(self) -> None:
         msg = AsyncMock()
         pm = ProgressMessageManager(initial_message=msg, start_time=0.0)
-        pm.activity_log.append(ActivityEntry(kind="tool", tool_name="Bash", is_running=True))
+        pm.activity_log.append(
+            ActivityEntry(kind="tool", tool_name="Bash", is_running=True)
+        )
         text = pm.render(done=True)
         assert "\u23f3" not in text
 
@@ -208,7 +217,9 @@ class TestSummarizeToolResult:
         assert result == ""
 
     def test_write_extracts_line_count(self) -> None:
-        result = summarize_tool_result("Write", "Wrote 94 lines to docs/plans/design.md")
+        result = summarize_tool_result(
+            "Write", "Wrote 94 lines to docs/plans/design.md"
+        )
         assert "94 lines" in result
 
 
@@ -311,7 +322,9 @@ class TestBuildStreamCallback:
         assert pm.activity_log[0].kind == "thinking"
         assert pm.activity_log[0].is_running is True
 
-    async def test_tool_result_attaches_to_last_tool(self, pm: ProgressMessageManager) -> None:
+    async def test_tool_result_attaches_to_last_tool(
+        self, pm: ProgressMessageManager
+    ) -> None:
         cb = build_stream_callback(pm)
         await cb("tool_use", {"name": "Bash", "input": {"command": "git status"}})
         await cb("tool_result", "On branch main\nnothing to commit")
@@ -325,7 +338,9 @@ class TestBuildStreamCallback:
         assert pm.activity_log[0].is_running is False
         assert pm.activity_log[1].is_running is True
 
-    async def test_text_after_tool_creates_new_entry(self, pm: ProgressMessageManager) -> None:
+    async def test_text_after_tool_creates_new_entry(
+        self, pm: ProgressMessageManager
+    ) -> None:
         cb = build_stream_callback(pm)
         await cb("text", "first")
         await cb("tool_use", {"name": "Read", "input": {}})
@@ -409,8 +424,12 @@ class TestEndToEndProgressFlow:
 
         # Add enough content to exceed MAX_MSG_LENGTH
         for i in range(100):
-            await cb("text", f"This is line number {i} with some extra text to fill space. ")
-            await cb("tool_use", {"name": "Read", "input": {"file_path": f"/src/file{i}.py"}})
+            await cb(
+                "text", f"This is line number {i} with some extra text to fill space. "
+            )
+            await cb(
+                "tool_use", {"name": "Read", "input": {"file_path": f"/src/file{i}.py"}}
+            )
             await cb("tool_result", f"Content of file {i}")
 
         # Should have rolled over to at least 2 messages
