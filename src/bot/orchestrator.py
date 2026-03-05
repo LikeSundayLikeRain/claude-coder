@@ -314,6 +314,7 @@ class MessageOrchestrator:
             BotCommand("status", "Show active sessions"),
             BotCommand("compact", "Compress context"),
             BotCommand("model", "Switch Claude model"),
+            BotCommand("commands", "Browse available skills"),
         ]
 
         return {"private": private_commands, "group": group_commands}
