@@ -100,7 +100,7 @@ def test_agentic_registers_commands(agentic_settings, deps):
     ]
     commands = [h[0][0].commands for h in cmd_handlers]
 
-    assert len(cmd_handlers) == 11
+    assert len(cmd_handlers) == 12
     assert frozenset({"start"}) in commands
     assert frozenset({"new"}) in commands
     assert frozenset({"interrupt"}) in commands

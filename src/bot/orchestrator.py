@@ -7,6 +7,8 @@ and inline keyboards.
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
@@ -246,6 +248,7 @@ class MessageOrchestrator:
             ("commands", self.handle_commands),
             ("remove", self.handle_remove),
             ("history", self.handle_history),
+            ("restart", self.handle_restart),
         ]
 
         for cmd, handler in handlers:
@@ -1169,6 +1172,7 @@ class MessageOrchestrator:
                     "commands",
                     "remove",
                     "history",
+                    "restart",
                 }
 
                 if potential_skill_name not in registered_commands:
@@ -1597,6 +1601,17 @@ class MessageOrchestrator:
         messages = format_condensed(entries, last_n=last_n)
         for msg in messages:
             await update.message.reply_text(msg)
+
+    async def handle_restart(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Restart the bot process (for picking up code changes)."""
+        if not update.message:
+            return
+        await update.message.reply_text("Restarting bot...")
+        logger.info("restart_requested", user_id=update.effective_user.id)
+        # SIGINT triggers graceful shutdown; systemd/wrapper restarts the process
+        os.kill(os.getpid(), signal.SIGINT)
 
     async def handle_resume(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

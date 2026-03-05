@@ -1,0 +1,27 @@
+[Unit]
+Description=Claude Coder Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=moxu
+Group=amazon
+WorkingDirectory=/local/home/moxu/claude-coder
+ExecStart=/home/moxu/.local/bin/uv run claude-telegram-bot
+EnvironmentFile=/local/home/moxu/claude-coder/.env
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=claude-coder
+
+# Graceful shutdown
+TimeoutStopSec=10
+KillSignal=SIGINT
+
+# Environment
+Environment=HOME=/home/moxu
+Environment=PATH=/home/moxu/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target
