@@ -2175,7 +2175,7 @@ class MessageOrchestrator:
                             session_id=client.session_id,
                         )
 
-                await query.message.reply_text(
+                await query.edit_message_text(
                     f"Topic <b>{escape_html(final_name)}</b> created "
                     f"→ <code>{escape_html(directory)}</code>",
                     parse_mode="HTML",

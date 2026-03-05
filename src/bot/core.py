@@ -20,6 +20,7 @@ from telegram.ext import (
     AIORateLimiter,
     Application,
     ContextTypes,
+    Defaults,
     MessageHandler,
     filters,
 )
@@ -54,6 +55,7 @@ class ClaudeCodeBot:
         # Create application
         builder = Application.builder()
         builder.token(self.settings.telegram_token_str)
+        builder.defaults(Defaults(do_quote=False))
         builder.rate_limiter(AIORateLimiter(max_retries=1))
 
         # Enable concurrent update processing so /interrupt can run
