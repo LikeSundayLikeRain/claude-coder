@@ -56,6 +56,10 @@ class ClaudeCodeBot:
         builder.token(self.settings.telegram_token_str)
         builder.rate_limiter(AIORateLimiter(max_retries=1))
 
+        # Enable concurrent update processing so /interrupt can run
+        # while a query handler is awaiting client.submit().
+        builder.concurrent_updates(True)
+
         # Configure connection settings
         builder.connect_timeout(30)
         builder.read_timeout(30)

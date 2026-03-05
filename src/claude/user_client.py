@@ -19,6 +19,12 @@ from .stream_handler import StreamHandler
 logger = structlog.get_logger()
 
 
+class QueryInterruptedError(Exception):
+    """Raised when a query is interrupted by the user."""
+
+    pass
+
+
 @dataclass
 class WorkItem:
     """A unit of work for the actor's queue."""
@@ -71,6 +77,8 @@ class UserClient:
         self._worker_task: Optional[asyncio.Task[None]] = None
         self._running = False
         self._querying = False
+        self._interrupt_event: asyncio.Event = asyncio.Event()
+        self._current_item: Optional[WorkItem] = None
         self._sdk_client: Optional[ClaudeSDKClient] = None
         self._options: Optional[ClaudeAgentOptions] = None
         self._connected_event: asyncio.Event = asyncio.Event()
@@ -146,10 +154,38 @@ class UserClient:
         return await future
 
     async def interrupt(self) -> None:
-        """Interrupt the current query if one is running."""
-        if self._querying and self._sdk_client is not None:
-            await self._sdk_client.interrupt()
-            logger.info("query_interrupted", user_id=self.user_id)
+        """Interrupt the current query if one is running.
+
+        Sets the interrupt event (persistent until cleared), signals the SDK
+        subprocess, resolves the pending future so the orchestrator unblocks,
+        and drains any queued items.
+        """
+        self._interrupt_event.set()
+
+        if self._sdk_client is not None:
+            try:
+                await self._sdk_client.interrupt()
+            except Exception as e:
+                logger.debug("sdk_interrupt_error", error=str(e))
+
+        # Resolve the pending future so the orchestrator's await unblocks
+        if self._current_item is not None and not self._current_item.future.done():
+            self._current_item.future.set_exception(
+                QueryInterruptedError("Query interrupted by user")
+            )
+
+        # Drain queued items so stale queries are not processed
+        while not self._queue.empty():
+            try:
+                pending = self._queue.get_nowait()
+                if pending is not None and not pending.future.done():
+                    pending.future.set_exception(
+                        QueryInterruptedError("Query interrupted by user")
+                    )
+            except asyncio.QueueEmpty:
+                break
+
+        logger.info("query_interrupted", user_id=self.user_id)
 
     async def _worker(self) -> None:
         """Long-lived task: connect, process queue, disconnect."""
@@ -255,10 +291,16 @@ class UserClient:
 
     async def _process_item(self, item: WorkItem) -> None:
         """Execute a single query and set the result on the future."""
+        self._interrupt_event.clear()
+        self._current_item = item
         self._querying = True
         start_ms = int(time.time() * 1000)
         stream_handler = StreamHandler()
         try:
+            # If future was already resolved by interrupt() before we got here, bail
+            if item.future.done():
+                return
+
             response_text = ""
             result_session_id: Optional[str] = None
             cost = 0.0
@@ -275,6 +317,11 @@ class UserClient:
 
             await self._sdk_client.query(_prompt_iter())  # type: ignore[union-attr]
             async for raw_data in self._sdk_client._query.receive_messages():  # type: ignore[union-attr]
+                # Check interrupt event each iteration to break promptly
+                if self._interrupt_event.is_set():
+                    logger.info("receive_loop_interrupted", user_id=self.user_id)
+                    break
+
                 try:
                     message = parse_message(raw_data)
                 except MessageParseError:
@@ -315,22 +362,32 @@ class UserClient:
                 if isinstance(message, ResultMessage):
                     break
 
+            # If interrupted, the future is already resolved by interrupt()
+            if self._interrupt_event.is_set():
+                if not item.future.done():
+                    item.future.set_exception(
+                        QueryInterruptedError("Query interrupted by user")
+                    )
+                return
+
             duration_ms = int(time.time() * 1000) - start_ms
 
             if result_session_id:
                 self.session_id = result_session_id
 
-            item.future.set_result(
-                QueryResult(
-                    response_text=response_text,
-                    session_id=result_session_id,
-                    cost=cost,
-                    num_turns=num_turns,
-                    duration_ms=duration_ms,
+            if not item.future.done():
+                item.future.set_result(
+                    QueryResult(
+                        response_text=response_text,
+                        session_id=result_session_id,
+                        cost=cost,
+                        num_turns=num_turns,
+                        duration_ms=duration_ms,
+                    )
                 )
-            )
         except Exception as e:
             if not item.future.done():
                 item.future.set_exception(e)
         finally:
+            self._current_item = None
             self._querying = False

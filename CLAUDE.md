@@ -31,7 +31,7 @@ uv run mypy src
 **Agentic mode** uses a layered client architecture:
 
 - `ClientManager` (`src/claude/client_manager.py`) — Manages persistent per-(user, chat, thread) `UserClient` actors keyed by `(user_id, chat_id, message_thread_id)` for concurrent multi-topic sessions. Actors self-remove on idle timeout via `on_exit` callback.
-- `UserClient` (`src/claude/user_client.py`) — Actor-based Claude SDK client for one user. A long-lived asyncio task owns the full `connect → query → disconnect` lifecycle in a single task (required by the SDK's anyio cancel scopes). Public API: `start()`, `submit()`, `stop()`, `interrupt()`. Idle timeout built into the worker's `queue.get()`.
+- `UserClient` (`src/claude/user_client.py`) — Actor-based Claude SDK client for one user. A long-lived asyncio task owns the full `connect → query → disconnect` lifecycle in a single task (required by the SDK's anyio cancel scopes). Public API: `start()`, `submit()`, `stop()`, `interrupt()`, `set_model()`. Idle timeout built into the worker's `queue.get()`. Model changes via `set_model()` trigger automatic SDK reconnection on the next query. Interrupt uses `asyncio.Event` + future resolution for reliable cancellation — raises `QueryInterruptedError` to unblock the orchestrator.
 - `OptionsBuilder` (`src/claude/options.py`) — Builds `ClaudeAgentOptions` from CLI settings (`~/.claude/settings.json`) with full feature parity: model selection, system prompt, permission mode, tool monitoring via `can_use_tool`, and `CLAUDECODE` env clearing.
 - `StreamHandler` (`src/claude/stream_handler.py`) — Extracts structured `StreamEvent`s from SDK messages (`ResultMessage`, `AssistantMessage`, `StreamEvent` partials).
 - `ProgressMessageManager` (`src/bot/progress.py`) — Rich progress display for Telegram. Maintains a persistent activity log message showing narrative text, tool calls, and thinking indicators in real-time. Intermediate text appears inline (💬) so users can follow Claude's reasoning as it works; only the final text block is sent as the response message.
@@ -47,7 +47,7 @@ Sessions auto-resume: per `(user_id, chat_id, message_thread_id)`, stored in the
 
 ```
 Telegram message -> Security middleware (group -3) -> Auth middleware (group -2)
--> MessageOrchestrator.agentic_text() (group 10)
+-> MessageOrchestrator handlers (group 0, concurrent_updates=True)
 -> (chat_id, message_thread_id) routing — supergroups auto-detected, DMs use thread_id=0
 -> ClientManager.get_or_connect(user_id, chat_id, message_thread_id) -> UserClient.submit() -> actor processes query
 -> StreamHandler extracts events inside actor -> ProgressMessageManager renders real-time activity log
@@ -139,7 +139,7 @@ All datetimes use timezone-aware UTC: `datetime.now(UTC)` (not `datetime.utcnow(
 
 ### Agentic mode
 
-Agentic mode commands: `/start`, `/new`, `/interrupt`, `/status`, `/compact`, `/model`, `/repo`, `/resume`, `/commands`. In supergroups with topics (auto-detected): `/start` (wizard: pick dir → session → creates topic), `/new` (creates new topic), `/remove`, `/history`, `/status` (dashboard). `/resume` is only available in DM and General topic. Unrecognized `/commands` are passed through to Claude as skill invocations. To add a new command:
+Agentic mode commands: `/start`, `/new`, `/interrupt`, `/status`, `/compact`, `/model`, `/repo`, `/resume`, `/commands`, `/history`. In supergroups with topics (auto-detected): `/start` (wizard: pick dir → session → creates topic), `/new` (creates new topic), `/remove`, `/history`, `/status` (dashboard). `/resume` is only available in DM and General topic. Unrecognized `/commands` are passed through to Claude as skill invocations. To add a new command:
 
 1. Add handler function in `src/bot/orchestrator.py`
 2. Register in `MessageOrchestrator._register_agentic_handlers()`

@@ -15,7 +15,7 @@ class FormattedMessage:
     """Represents a formatted message for Telegram."""
 
     text: str
-    parse_mode: str = "HTML"
+    parse_mode: Optional[str] = "HTML"
     reply_markup: Optional[InlineKeyboardMarkup] = None
 
     def __len__(self) -> int:
