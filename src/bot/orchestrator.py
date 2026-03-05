@@ -302,7 +302,7 @@ class MessageOrchestrator:
         app.add_handler(
             CallbackQueryHandler(
                 self._inject_deps(self._handle_callback),
-                pattern=r"^(cd:|nav:|sel:|start_nav:|start_sel:|start_ses:|session:|skill:|model:)",
+                pattern=r"^(cd:|nav:|sel:|start_nav:|start_sel:|start_ses:|session:|skill:|model:|remove_confirm:|remove_cancel)",
             )
         )
 
@@ -1544,19 +1544,33 @@ class MessageOrchestrator:
         chat_id = thread_ctx["chat_id"]
         message_thread_id = thread_ctx["message_thread_id"]
 
-        # Double-confirm gate (namespaced by thread_id)
-        remove_key = f"_pending_remove_{message_thread_id}"
-        if not context.chat_data.get(remove_key):
-            context.chat_data[remove_key] = True
-            await update.message.reply_text(
-                "\u26a0\ufe0f This will <b>permanently delete</b> this topic and all messages.\n\n"
-                "Send <code>/remove</code> again to confirm.",
-                parse_mode="HTML",
-            )
-            return
+        # Show confirmation with inline button
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "Confirm",
+                        callback_data=f"remove_confirm:{message_thread_id}",
+                    ),
+                    InlineKeyboardButton("Cancel", callback_data="remove_cancel"),
+                ]
+            ]
+        )
+        await update.message.reply_text(
+            "\u26a0\ufe0f This will <b>permanently delete</b> this topic and all messages.",
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+        return
 
-        # Confirmed — proceed with deletion
-        context.chat_data.pop(remove_key, None)
+    async def _handle_remove_confirmed(
+        self,
+        user_id: int,
+        chat_id: int,
+        message_thread_id: int,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Execute topic removal after confirmation."""
 
         # Disconnect client
         client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
@@ -1753,6 +1767,21 @@ class MessageOrchestrator:
         # Handle model callbacks
         if prefix == "model":
             await self.handle_model_callback(update, context)
+            return
+
+        # Handle remove confirmation/cancel
+        if prefix == "remove_confirm":
+            thread_id = int(value)
+            user_id = query.from_user.id
+            chat_id = query.message.chat.id if query.message else 0
+            await query.edit_message_text("Deleting topic...")
+            await self._handle_remove_confirmed(
+                user_id, chat_id, thread_id, context
+            )
+            return
+
+        if prefix == "remove_cancel":
+            await query.edit_message_text("Cancelled.")
             return
 
         # Handle skill callbacks
