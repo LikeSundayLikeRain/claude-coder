@@ -37,6 +37,7 @@ from ..claude.history import (
     read_first_message,
     read_session_transcript,
 )
+from ..claude.user_client import QueryInterruptedError
 from ..config.settings import Settings
 from ..projects.lifecycle import TopicLifecycleManager
 from .progress import ProgressMessageManager, build_stream_callback
@@ -334,7 +335,7 @@ class MessageOrchestrator:
             client = client_manager.get_active_client(
                 user_id, chat_id, message_thread_id
             )
-            if client and client.is_querying:
+            if client and client.is_connected:
                 await client_manager.interrupt(user_id, chat_id, message_thread_id)
                 await update.message.reply_text("Interrupting current query...")
                 return
@@ -1086,6 +1087,12 @@ class MessageOrchestrator:
                 claude_response.content
             )
 
+        except QueryInterruptedError:
+            success = True  # Not a failure — user-initiated cancellation
+            logger.info("query_interrupted_by_user", user_id=user_id)
+            formatted_messages = [
+                FormattedMessage("Query interrupted.", parse_mode=None)
+            ]
         except Exception as e:
             success = False
             logger.error("Claude query failed", error=str(e), user_id=user_id)

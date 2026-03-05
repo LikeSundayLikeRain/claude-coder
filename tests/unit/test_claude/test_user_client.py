@@ -1,6 +1,7 @@
 """Tests for UserClient actor pattern."""
 
 import asyncio
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -144,14 +145,66 @@ class TestUserClientInterrupt:
         mock_sdk.interrupt.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_interrupt_noop_when_not_querying(self) -> None:
+    async def test_interrupt_always_signals_sdk(self) -> None:
+        """interrupt() always signals the SDK regardless of _querying state.
+
+        This fixes the race condition where interrupt arrives before
+        _querying is set to True in _process_item().
+        """
         mock_sdk = AsyncMock()
         client = UserClient(user_id=1, directory="/dir")
         client._sdk_client = mock_sdk
         client._querying = False
 
         await client.interrupt()
-        mock_sdk.interrupt.assert_not_awaited()
+        mock_sdk.interrupt.assert_awaited_once()
+        assert client._interrupt_event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_interrupt_resolves_pending_future(self) -> None:
+        """interrupt() resolves the current item's future with InterruptedError."""
+        from src.claude.user_client import QueryInterruptedError
+
+        mock_sdk = AsyncMock()
+        client = UserClient(user_id=1, directory="/dir")
+        client._sdk_client = mock_sdk
+        client._querying = True
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[Any] = loop.create_future()
+        item = WorkItem(query=MagicMock(), future=future)
+        client._current_item = item
+
+        await client.interrupt()
+
+        assert future.done()
+        with pytest.raises(QueryInterruptedError):
+            future.result()
+
+    @pytest.mark.asyncio
+    async def test_interrupt_drains_queue(self) -> None:
+        """interrupt() drains pending items from the queue."""
+        from src.claude.user_client import QueryInterruptedError
+
+        mock_sdk = AsyncMock()
+        client = UserClient(user_id=1, directory="/dir")
+        client._sdk_client = mock_sdk
+
+        loop = asyncio.get_running_loop()
+        future1: asyncio.Future[Any] = loop.create_future()
+        future2: asyncio.Future[Any] = loop.create_future()
+        await client._queue.put(WorkItem(query=MagicMock(), future=future1))
+        await client._queue.put(WorkItem(query=MagicMock(), future=future2))
+
+        await client.interrupt()
+
+        assert client._queue.empty()
+        assert future1.done()
+        assert future2.done()
+        with pytest.raises(QueryInterruptedError):
+            future1.result()
+        with pytest.raises(QueryInterruptedError):
+            future2.result()
 
 
 class TestUserClientIdleTimeout:
