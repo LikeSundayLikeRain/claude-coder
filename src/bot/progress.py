@@ -157,7 +157,7 @@ def summarize_tool_result(tool_name: str, raw: str) -> str:
 # ---------------------------------------------------------------------------
 
 _ROLLOVER_THRESHOLD = 4000
-_UPDATE_INTERVAL = 5.0  # seconds — conservative for supergroup shared rate limits
+_UPDATE_INTERVAL = 3.0  # seconds between Telegram progress edits
 
 
 class ProgressMessageManager:
