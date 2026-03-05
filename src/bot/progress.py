@@ -290,7 +290,15 @@ class ProgressMessageManager:
     # ------------------------------------------------------------------
 
     async def finalize(self) -> None:
-        """Update header to 'Done', remove spinners, keep message in place."""
+        """Update header to 'Done', remove spinners, keep message in place.
+
+        Trailing text entries are stripped — they duplicate the response
+        message that is sent separately. Intermediate text (between tool
+        calls) is kept as useful context.
+        """
+        # Strip trailing text entries (final response), keep intermediate ones
+        while self.activity_log and self.activity_log[-1].kind == "text":
+            self.activity_log.pop()
         text = self.render(done=True)
         try:
             await self._message.edit_text(text)
