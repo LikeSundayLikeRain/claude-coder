@@ -75,6 +75,12 @@ class MessageOrchestrator:
 
             is_management_bypass = handler.__name__ in {"sync_threads", "handle_remove"}
             is_start_bypass = handler.__name__ in {"start_command", "handle_start"}
+            is_general_allowed = handler.__name__ in {
+                "start_command",
+                "handle_start",
+                "handle_status",
+                "_handle_callback",
+            }
             message_thread_id = self._extract_message_thread_id(update)
 
             chat = update.effective_chat
@@ -83,6 +89,15 @@ class MessageOrchestrator:
             if is_supergroup:
                 # Supergroup with topics — enforce thread routing
                 in_general = not message_thread_id
+
+                # Block commands not allowed in General topic
+                if in_general and not is_management_bypass and not is_general_allowed:
+                    if update.effective_message:
+                        await update.effective_message.reply_text(
+                            "Use this command inside a project topic."
+                        )
+                    return
+
                 should_enforce = not is_management_bypass and not (
                     is_start_bypass and in_general
                 )
@@ -317,6 +332,7 @@ class MessageOrchestrator:
             BotCommand("model", "Switch Claude model"),
             BotCommand("commands", "Browse available skills"),
             BotCommand("history", "Show session transcript"),
+            BotCommand("remove", "Delete this topic"),
         ]
 
         return {"private": private_commands, "group": group_commands}
@@ -2186,7 +2202,12 @@ class MessageOrchestrator:
                             # Mark as replayed so _execute_query skips it
                             context.chat_data[f"_history_replayed_{thread_id}"] = True
                     except Exception as e:
-                        logger.debug("wizard_transcript_send_failed", error=str(e))
+                        logger.warning(
+                            "wizard_transcript_send_failed",
+                            error=str(e),
+                            session_id=session_id,
+                            thread_id=thread_id,
+                        )
 
             except Exception as e:
                 logger.error("start_wizard_create_failed", error=str(e))
