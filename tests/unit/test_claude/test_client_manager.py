@@ -429,11 +429,11 @@ class TestSwitchSession:
 
 
 class TestSetModel:
-    """Test set_model() updates in-memory only."""
+    """Test set_model() delegates to client and flags model change."""
 
     @pytest.mark.asyncio
     async def test_set_model(self) -> None:
-        """Updates client model in-memory; does not persist to DB."""
+        """Calls client.set_model() to flag reconnect; does not persist to DB."""
         repo = _make_mock_chat_session_repo()
         builder = _make_mock_options_builder()
         mock_client = _make_mock_user_client(session_id="some-session")
@@ -458,7 +458,7 @@ class TestSetModel:
                 model="claude-opus-4-6",
             )
 
-        assert mock_client.model == "claude-opus-4-6"
+        mock_client.set_model.assert_called_once_with("claude-opus-4-6", None)
         repo.upsert.assert_not_awaited()
 
 

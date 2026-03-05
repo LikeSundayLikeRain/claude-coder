@@ -109,6 +109,9 @@ class ClientManager:
             session_id=resolved_session_id,
             approved_directory=approved_directory,
         )
+        # Store builder reference so the client can reconnect on model change
+        client._options_builder = self._options_builder
+        client._approved_directory = approved_directory
         await client.start(options)
         self._clients[key] = client
 
@@ -194,13 +197,11 @@ class ClientManager:
         model: str,
         betas: Optional[list[str]] = None,
     ) -> None:
-        """Update model on the client (in-memory only)."""
+        """Update model on the client, triggering reconnect on next query."""
         client = self._clients.get((user_id, chat_id, message_thread_id))
         if client is None:
             return
-        client.model = model
-        if betas is not None:
-            client.betas = betas
+        client.set_model(model, betas)
 
     def get_active_client(
         self, user_id: int, chat_id: int, message_thread_id: int

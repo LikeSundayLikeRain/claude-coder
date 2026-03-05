@@ -65,6 +65,7 @@ class UserClient:
         self.betas = betas
         self.idle_timeout = idle_timeout
         self._on_exit = on_exit
+        self._model_changed = False
 
         self._queue: asyncio.Queue[Optional[WorkItem]] = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task[None]] = None
@@ -75,6 +76,9 @@ class UserClient:
         self._connected_event: asyncio.Event = asyncio.Event()
         self._connect_error: Optional[Exception] = None
         self._available_commands: list[dict[str, Any]] = []
+        # Stored for reconnect on model change
+        self._options_builder: Optional[Any] = None
+        self._approved_directory: Optional[str] = None
 
     @property
     def is_connected(self) -> bool:
@@ -92,6 +96,13 @@ class UserClient:
     def has_command(self, name: str) -> bool:
         """Check if a command name exists in the cached list."""
         return any(cmd["name"] == name for cmd in self._available_commands)
+
+    def set_model(self, model: str, betas: Optional[list[str]] = None) -> None:
+        """Set a new model to take effect on the next query."""
+        self.model = model
+        if betas is not None:
+            self.betas = betas
+        self._model_changed = True
 
     async def start(self, options: ClaudeAgentOptions) -> None:
         """Spawn the worker task and connect the SDK client."""
@@ -176,6 +187,38 @@ class UserClient:
 
                 if item is None:  # stop sentinel
                     break
+
+                # Reconnect with new model if changed between queries
+                if self._model_changed and self._options_builder is not None:
+                    self._model_changed = False
+                    logger.info(
+                        "reconnecting_for_model_change",
+                        user_id=self.user_id,
+                        model=self.model,
+                    )
+                    try:
+                        sdk = self._sdk_client
+                        await sdk.disconnect()  # type: ignore[union-attr]
+                    except Exception as e:
+                        logger.debug(
+                            "disconnect_before_reconnect_error",
+                            error=str(e),
+                        )
+                    self._options = self._options_builder.build(
+                        cwd=self.directory,
+                        session_id=self.session_id,
+                        model=self.model,
+                        betas=self.betas,
+                        approved_directory=self._approved_directory,
+                    )
+                    self._sdk_client = ClaudeSDKClient(self._options)
+                    await self._sdk_client.connect()
+                    logger.info(
+                        "reconnected_with_new_model",
+                        user_id=self.user_id,
+                        model=self.model,
+                        session_id=self.session_id,
+                    )
 
                 await self._process_item(item)
 

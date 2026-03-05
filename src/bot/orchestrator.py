@@ -393,7 +393,9 @@ class MessageOrchestrator:
             await client_manager.set_model(
                 user_id, chat_id, message_thread_id, model, betas
             )
-            await query.edit_message_text(f"Model set to: {label}")
+            await query.edit_message_text(
+                f"Model switched to {label}. Active on your next message."
+            )
         else:
             await query.edit_message_text("Model switching is not available.")
 
