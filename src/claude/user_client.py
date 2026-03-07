@@ -372,8 +372,20 @@ class UserClient:
                 if isinstance(message, ResultMessage):
                     break
 
-            # If interrupted, the future is already resolved by interrupt()
+            # If interrupted, drain remaining messages so the next query
+            # starts with a clean pipe (prevents stale ResultMessage from
+            # the interrupted query being consumed by the next _process_item).
             if self._interrupt_event.is_set():
+                try:
+                    async for leftover in self._sdk_client._query.receive_messages():  # type: ignore[union-attr]
+                        try:
+                            msg = parse_message(leftover)
+                        except MessageParseError:
+                            continue
+                        if isinstance(msg, ResultMessage):
+                            break
+                except Exception:
+                    pass  # best-effort drain
                 if not item.future.done():
                     item.future.set_exception(
                         QueryInterruptedError("Query interrupted by user")
