@@ -305,8 +305,8 @@ class TestMigration12:
     # End-to-end: DatabaseManager.initialize() runs all migrations incl. 12
     # ------------------------------------------------------------------
 
-    def test_database_manager_initialize_reaches_v12(self) -> None:
-        """DatabaseManager.initialize() must bring schema to version 12."""
+    def test_database_manager_initialize_reaches_latest(self) -> None:
+        """DatabaseManager.initialize() must bring schema to latest version."""
         import asyncio
         import tempfile as _tmp
 
@@ -321,4 +321,4 @@ class TestMigration12:
                 await dm.close()
                 return version
 
-        assert asyncio.run(_run()) == 12
+        assert asyncio.run(_run()) == 13

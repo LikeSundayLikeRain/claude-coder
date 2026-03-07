@@ -181,9 +181,7 @@ async def test_agentic_bot_commands(agentic_settings, deps):
     group_names = [c.command for c in result["group"]]
     assert "start" in group_names
     assert "status" in group_names
-    # Topic-specific commands (remove, history, etc.) are handled by
-    # the bot but not shown in the group autocomplete menu
-    assert "remove" not in group_names
+    assert "remove" in group_names
 
 
 async def test_agentic_start_no_keyboard(agentic_settings, deps):
@@ -793,10 +791,10 @@ async def test_general_topic_sets_in_general_topic_flag(group_thread_settings, d
 
     captured = {"flag": None}
 
-    async def dummy_handler(update, context):
+    async def handle_status(update, context):
         captured["flag"] = context.user_data.get("_in_general_topic")
 
-    wrapped = orchestrator._inject_deps(dummy_handler)
+    wrapped = orchestrator._inject_deps(handle_status)
 
     update = MagicMock()
     update.effective_chat.id = -1001234567890  # configured chat

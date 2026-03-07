@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Callable, Optional
 
 import structlog
@@ -33,6 +34,8 @@ class ClientManager:
         self._bot = bot
         self._lifecycle_manager = lifecycle_manager
         self._clients: dict[tuple[int, int, int], UserClient] = {}
+        # Persisted model/betas preferences survive client eviction (idle timeout, crash)
+        self._model_prefs: dict[tuple[int, int, int], tuple[str, list[str]]] = {}
 
     def _make_on_exit(
         self, user_id: int, chat_id: int, message_thread_id: int
@@ -87,26 +90,47 @@ class ClientManager:
         if existing is not None:
             await existing.stop()
 
-        # Resolve session_id: explicit > persisted DB
-        # Skip auto-resolution when force_new
+        # Resolve session_id and model prefs from DB in a single lookup.
+        # Skip auto-resolution when force_new.
         resolved_session_id = session_id
+        db_session = None
 
-        if resolved_session_id is None and not force_new:
-            session = await self._chat_session_repo.get(chat_id, message_thread_id)
-            if session is not None and session.session_id:
-                resolved_session_id = session.session_id
+        if not force_new:
+            needs_session = resolved_session_id is None
+            needs_model = self._model_prefs.get(key) is None
+            if needs_session or needs_model:
+                db_session = await self._chat_session_repo.get(
+                    chat_id, message_thread_id
+                )
+
+            if needs_session and db_session is not None and db_session.session_id:
+                resolved_session_id = db_session.session_id
+
+        # Apply model/betas preference: in-memory cache > DB > None
+        pref = self._model_prefs.get(key)
+        if pref is None and not force_new and db_session is not None:
+            if db_session.model:
+                db_betas = json.loads(db_session.betas) if db_session.betas else []
+                pref = (db_session.model, db_betas)
+                self._model_prefs[key] = pref  # warm the cache
+        pref_model = pref[0] if pref else None
+        pref_betas = pref[1] if pref else None
 
         # Create and start
         client = UserClient(
             user_id=user_id,
             directory=directory,
             session_id=resolved_session_id,
+            model=pref_model,
+            betas=pref_betas,
             idle_timeout=self._idle_timeout,
             on_exit=self._make_on_exit(user_id, chat_id, message_thread_id),
         )
         options = self._options_builder.build(
             cwd=directory,
             session_id=resolved_session_id,
+            model=pref_model,
+            betas=pref_betas,  # type: ignore[arg-type]
             approved_directory=approved_directory,
         )
         # Store builder reference so the client can reconnect on model change
@@ -197,11 +221,25 @@ class ClientManager:
         model: str,
         betas: Optional[list[str]] = None,
     ) -> None:
-        """Update model on the client, triggering reconnect on next query."""
-        client = self._clients.get((user_id, chat_id, message_thread_id))
-        if client is None:
-            return
-        client.set_model(model, betas)
+        """Update model on the client, triggering reconnect on next query.
+
+        The preference is persisted to both the in-memory cache and the
+        database so it survives client eviction, idle timeout, and bot
+        restarts.
+        """
+        resolved_betas = betas or []
+        key = (user_id, chat_id, message_thread_id)
+        self._model_prefs[key] = (model, resolved_betas)
+        client = self._clients.get(key)
+        if client is not None:
+            client.set_model(model, resolved_betas)
+        # Persist to DB for restart survival
+        await self._chat_session_repo.set_model(
+            chat_id,
+            message_thread_id,
+            model,
+            json.dumps(resolved_betas) if resolved_betas else None,
+        )
 
     def get_active_client(
         self, user_id: int, chat_id: int, message_thread_id: int
@@ -255,6 +293,7 @@ class ClientManager:
             client = self._clients.pop(key, None)
             if client is not None:
                 await client.stop()
+        self._model_prefs.clear()
 
     async def update_session_id(
         self,

@@ -40,6 +40,8 @@ class ChatSessionModel:
     directory: str
     session_id: Optional[str] = None
     topic_name: Optional[str] = None
+    model: Optional[str] = None
+    betas: Optional[str] = None
     is_active: bool = True
     created_at: Optional[datetime] = None
 
@@ -56,6 +58,9 @@ class ChatSessionModel:
         if val and isinstance(val, str):
             data["created_at"] = datetime.fromisoformat(val)
         data["is_active"] = bool(data.get("is_active", True))
+        # Columns added in migration 13 — may be absent in old rows
+        data.setdefault("model", None)
+        data.setdefault("betas", None)
         return cls(**data)
 
 

@@ -108,6 +108,8 @@ class TestGetOrConnect:
     async def test_resolves_session_from_repo(self, manager, chat_session_repo):
         session_row = MagicMock()
         session_row.session_id = "persisted-session"
+        session_row.model = None
+        session_row.betas = None
         chat_session_repo.get.return_value = session_row
 
         mock_client = make_mock_client("persisted-session")

@@ -14,6 +14,7 @@ def _make_mock_chat_session_repo() -> MagicMock:
     repo.get = AsyncMock(return_value=None)
     repo.upsert = AsyncMock()
     repo.delete = AsyncMock()
+    repo.set_model = AsyncMock()
     return repo
 
 
@@ -433,7 +434,7 @@ class TestSetModel:
 
     @pytest.mark.asyncio
     async def test_set_model(self) -> None:
-        """Calls client.set_model() to flag reconnect; does not persist to DB."""
+        """Calls client.set_model() and persists preference to DB."""
         repo = _make_mock_chat_session_repo()
         builder = _make_mock_options_builder()
         mock_client = _make_mock_user_client(session_id="some-session")
@@ -458,8 +459,10 @@ class TestSetModel:
                 model="claude-opus-4-6",
             )
 
-        mock_client.set_model.assert_called_once_with("claude-opus-4-6", None)
-        repo.upsert.assert_not_awaited()
+        mock_client.set_model.assert_called_once_with("claude-opus-4-6", [])
+        repo.set_model.assert_awaited_once_with(
+            _CID, _TID, "claude-opus-4-6", None
+        )
 
 
 @pytest.fixture

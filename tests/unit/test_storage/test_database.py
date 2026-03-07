@@ -108,7 +108,7 @@ class TestDatabaseManager:
         async with db_manager.get_connection() as conn:
             cursor = await conn.execute("SELECT MAX(version) FROM schema_version")
             version = await cursor.fetchone()
-            assert version[0] == 12  # Should be at migration 12
+            assert version[0] == 13  # Should be at migration 13
 
     async def test_views_dropped(self, db_manager):
         """Test that analytics views were dropped by migration 7."""

@@ -74,6 +74,25 @@ class ChatSessionRepository:
             )
             await conn.commit()
 
+    async def set_model(
+        self,
+        chat_id: int,
+        message_thread_id: int,
+        model: Optional[str],
+        betas: Optional[str],
+    ) -> None:
+        """Persist model/betas preference for a session."""
+        async with self.db.get_connection() as conn:
+            await conn.execute(
+                """
+                UPDATE chat_sessions
+                SET model = ?, betas = ?
+                WHERE chat_id = ? AND message_thread_id = ? AND is_active = 1
+                """,
+                (model, betas, chat_id, message_thread_id),
+            )
+            await conn.commit()
+
     async def deactivate(self, chat_id: int, message_thread_id: int) -> int:
         """Soft-delete (is_active=0). Returns rowcount."""
         async with self.db.get_connection() as conn:

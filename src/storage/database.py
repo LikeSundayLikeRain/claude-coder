@@ -519,6 +519,14 @@ class DatabaseManager:
                 PRAGMA foreign_keys = ON;
                 """,
             ),
+            (
+                13,
+                """
+                -- Add model/betas columns so preferences survive bot restarts.
+                ALTER TABLE chat_sessions ADD COLUMN model TEXT;
+                ALTER TABLE chat_sessions ADD COLUMN betas TEXT;
+                """,
+            ),
         ]
 
     async def _init_pool(self):

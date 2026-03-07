@@ -244,10 +244,9 @@ async def test_skill_callback_passthrough(orchestrator, mock_context):
                 mock_run.return_value = mock_claude_response
                 await orchestrator._handle_callback(mock_update, mock_context)
 
-    # Verify prompt passed verbatim as /skill_name
+    # Verify query text passed verbatim as /skill_name
     mock_run.assert_called_once()
-    prompt = mock_run.call_args.kwargs.get(
-        "prompt", mock_run.call_args[0][0] if mock_run.call_args[0] else ""
-    )
-    assert prompt == "/deploy"
-    assert "<skill-invocation>" not in prompt
+    query_arg = mock_run.call_args.kwargs.get("query")
+    assert query_arg is not None
+    assert query_arg.text == "/deploy"
+    assert "<skill-invocation>" not in query_arg.text

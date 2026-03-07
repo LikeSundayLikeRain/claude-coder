@@ -394,13 +394,16 @@ class MessageOrchestrator:
         # parts[0] = "model", parts[1] = model name, parts[2] = optional "1m"
         if len(parts) < 2:
             return
-        model = parts[1]
+        base_model = parts[1]
         is_1m = len(parts) > 2 and parts[2] == "1m"
-        betas = ["context-1m-2025-08-07"] if is_1m else None
+        # Encode 1M in the model name (e.g. "opus[1m]") so the CLI
+        # handles extended context natively — works for both Bedrock
+        # and direct API.  The separate --betas flag is API-key-only.
+        model = f"{base_model}[1m]" if is_1m else base_model
 
         # Build display label
         label_map = {"sonnet": "Sonnet", "opus": "Opus", "haiku": "Haiku"}
-        label = label_map.get(model, model)
+        label = label_map.get(base_model, base_model)
         if is_1m:
             label += " 1M"
 
@@ -409,7 +412,7 @@ class MessageOrchestrator:
         client_manager: Optional[ClientManager] = context.bot_data.get("client_manager")
         if client_manager:
             await client_manager.set_model(
-                user_id, chat_id, message_thread_id, model, betas
+                user_id, chat_id, message_thread_id, model
             )
             await query.edit_message_text(
                 f"Model switched to {label}. Active on your next message."
@@ -1011,23 +1014,27 @@ class MessageOrchestrator:
         user_id = update.effective_user.id
         chat_id, message_thread_id = self._resolve_chat_key(update, context)
 
-        # Sync from active client (e.g. after API-driven /resume)
+        # Resolve session for THIS topic.  context.user_data is per-user
+        # (not per-topic), so we must always resolve from the active client
+        # or the DB — never rely on a stale value left by a different topic.
         _cm: Optional[ClientManager] = context.bot_data.get("client_manager")
-        if _cm:
-            _active = _cm.get_active_client(user_id, chat_id, message_thread_id)
-            if _active and _active.is_connected:
-                context.user_data["current_directory"] = Path(_active.directory)
-                if _active.session_id:
-                    context.user_data["claude_session_id"] = _active.session_id
-
-        # Cold-start restoration — per (chat_id, message_thread_id)
-        storage = context.bot_data.get("storage")
-        if "claude_session_id" not in context.user_data and storage:
-            session = await storage.load_session(chat_id, message_thread_id)
-            if session and session.session_id:
-                context.user_data["claude_session_id"] = session.session_id
-            else:
-                context.user_data["claude_session_id"] = None
+        _active = (
+            _cm.get_active_client(user_id, chat_id, message_thread_id)
+            if _cm
+            else None
+        )
+        if _active and _active.is_connected:
+            context.user_data["current_directory"] = Path(_active.directory)
+            context.user_data["claude_session_id"] = _active.session_id
+        else:
+            # No active client for this topic — load from DB
+            storage = context.bot_data.get("storage")
+            if storage:
+                session = await storage.load_session(chat_id, message_thread_id)
+                if session and session.session_id:
+                    context.user_data["claude_session_id"] = session.session_id
+                else:
+                    context.user_data["claude_session_id"] = None
 
         current_dir = context.user_data.get(
             "current_directory", self.settings.approved_directories[0]
@@ -1775,9 +1782,7 @@ class MessageOrchestrator:
             user_id = query.from_user.id
             chat_id = query.message.chat.id if query.message else 0
             await query.edit_message_text("Deleting topic...")
-            await self._handle_remove_confirmed(
-                user_id, chat_id, thread_id, context
-            )
+            await self._handle_remove_confirmed(user_id, chat_id, thread_id, context)
             return
 
         if prefix == "remove_cancel":
@@ -1791,7 +1796,7 @@ class MessageOrchestrator:
                 "current_directory", self.settings.approved_directories[0]
             )
 
-            prompt = f"/{skill_name}"
+            skill_prompt = f"/{skill_name}"
             session_id = context.user_data.get("claude_session_id")
 
             # Show running message
@@ -1801,6 +1806,8 @@ class MessageOrchestrator:
             )
 
             # Execute via Claude
+            from .attachments import Query
+
             user_id = query.from_user.id
             force_new = bool(context.user_data.get("force_new_session"))
 
@@ -1818,7 +1825,7 @@ class MessageOrchestrator:
             success = True
             try:
                 claude_response = await self._run_claude_query(
-                    prompt=prompt,
+                    query=Query(text=skill_prompt),
                     user_id=user_id,
                     current_dir=current_dir,
                     session_id=session_id,

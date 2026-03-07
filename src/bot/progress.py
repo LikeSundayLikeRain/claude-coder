@@ -276,9 +276,10 @@ class ProgressMessageManager:
             await self._message.edit_text(self.render(done=False))
         except Exception:
             pass
-        # Send a new message in the same chat
+        # Send a new message in the same chat (preserve topic in supergroups)
         new_message = await self._message.chat.send_message(
             text="Working... (continued)",
+            message_thread_id=self._message.message_thread_id,
         )
         self._message = new_message
         self.messages.append(new_message)

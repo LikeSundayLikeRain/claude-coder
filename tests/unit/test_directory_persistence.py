@@ -507,10 +507,10 @@ class TestColdStartRestoration:
         assert context.user_data.get("claude_session_id") is not None
 
     @pytest.mark.asyncio
-    async def test_no_restore_after_explicit_clear(
+    async def test_always_resolves_session_from_db(
         self, single_root_tmpdir, mock_deps, mock_update_and_context
     ):
-        """After /new or /repo, session_id key exists as None — no DB restore."""
+        """Session is always resolved per-topic from DB (not stale user_data)."""
         settings = create_test_config(
             approved_directory=str(single_root_tmpdir),
         )
@@ -521,11 +521,13 @@ class TestColdStartRestoration:
         update.message.text = "hello"
         update.message.chat.send_action = AsyncMock()
         context.bot_data = mock_deps
-        # Explicit clear: key exists with None value
-        context.user_data = {"claude_session_id": None}
+        # Even with a stale value, DB is consulted when no active client
+        context.user_data = {"claude_session_id": "stale-from-other-topic"}
 
         orchestrator = MessageOrchestrator(settings, mock_deps)
         await orchestrator.handle_text(update, context)
 
-        # Should NOT call load_session (key already present as None)
-        mock_deps["storage"].load_session.assert_not_called()
+        # DB is always consulted when no active client exists
+        mock_deps["storage"].load_session.assert_called_once()
+        # DB returned None, so session_id is cleared
+        assert context.user_data.get("claude_session_id") is None

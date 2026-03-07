@@ -108,8 +108,7 @@ class UserClient:
     def set_model(self, model: str, betas: Optional[list[str]] = None) -> None:
         """Set a new model to take effect on the next query."""
         self.model = model
-        if betas is not None:
-            self.betas = betas
+        self.betas = betas
         self._model_changed = True
 
     async def start(self, options: ClaudeAgentOptions) -> None:
@@ -240,21 +239,32 @@ class UserClient:
                             "disconnect_before_reconnect_error",
                             error=str(e),
                         )
-                    self._options = self._options_builder.build(
-                        cwd=self.directory,
-                        session_id=self.session_id,
-                        model=self.model,
-                        betas=self.betas,
-                        approved_directory=self._approved_directory,
-                    )
-                    self._sdk_client = ClaudeSDKClient(self._options)
-                    await self._sdk_client.connect()
-                    logger.info(
-                        "reconnected_with_new_model",
-                        user_id=self.user_id,
-                        model=self.model,
-                        session_id=self.session_id,
-                    )
+                    try:
+                        self._options = self._options_builder.build(
+                            cwd=self.directory,
+                            session_id=self.session_id,
+                            model=self.model,
+                            betas=self.betas,
+                            approved_directory=self._approved_directory,
+                        )
+                        self._sdk_client = ClaudeSDKClient(self._options)
+                        await self._sdk_client.connect()
+                        logger.info(
+                            "reconnected_with_new_model",
+                            user_id=self.user_id,
+                            model=self.model,
+                            session_id=self.session_id,
+                        )
+                    except Exception as reconnect_err:
+                        logger.error(
+                            "model_reconnect_failed",
+                            user_id=self.user_id,
+                            model=self.model,
+                            error=str(reconnect_err),
+                        )
+                        if not item.future.done():
+                            item.future.set_exception(reconnect_err)
+                        continue
 
                 await self._process_item(item)
 
